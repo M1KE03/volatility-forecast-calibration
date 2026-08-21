@@ -1,0 +1,26 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Environments
+.venv/
+venv/
+env/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Derived artefacts -- regenerable from data/raw via run_all.py
+data/processed/*
+!data/processed/.gitkeep
+figures/*
+!figures/.gitkeep
+
+# NOTE: data/raw/ is deliberately NOT ignored. Yahoo Finance revises history,
+# so the raw CSV snapshots are committed alongside a SHA-256 manifest to make
+# results reproducible. See research_log.md, decision B3.

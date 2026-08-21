@@ -1,0 +1,35 @@
+# Direct dependencies, pinned. Verified to resolve together on
+# Python 3.12 / Windows (pip 25.0.1, resolver dry-run, 2026-08-21).
+#
+# For a byte-exact environment, install these and then commit the output of
+# `pip freeze` as requirements.lock.txt.
+
+# --- Core numerics ---
+numpy==2.5.2
+pandas==2.3.3
+scipy==1.18.0
+
+# --- Compiled inner loop for the GARCH recursion ---
+# The GARCH variance recursion is sequential and cannot be vectorised. A pure
+# Python loop makes MCMC over ~100 refits computationally infeasible. numba
+# ships its own LLVM and needs no system C/C++ compiler. See decision B1.
+numba==0.67.0
+
+# --- Bayesian sampler ---
+emcee==3.1.6
+
+# --- Data ---
+yfinance==1.6.0
+
+# --- Validation only: cross-check our own MLE against a reference GARCH
+# implementation. NOT used to produce headline results. See decision B1.
+arch==8.0.0
+
+# --- Figures ---
+matplotlib==3.11.1
+
+# --- Tests ---
+pytest==9.1.1
+
+# --- Notebooks (added at the stage where notebooks are introduced) ---
+# jupyterlab==<pin at that time>
