@@ -126,6 +126,46 @@ The baselines yield a variance forecast but no innovation distribution, yet they
 intervals to be comparable on coverage. Proposal: Gaussian reference. Fitting a
 Student-t would promote them from baselines to competitors. **Not yet decided.**
 
+### 1.4 Decided at Stage 2 (2026-08-22)
+
+**D8 — One month of download buffer before `SAMPLE_START`.**
+The locked sample begins 2014-01-01 and the training window at 2014-01-02, which is the
+first trading day of the sample. Both derived quantities that the pipeline depends on
+are lagged: `log_return` on 2014-01-02 needs the adjusted close on 2013-12-31, and the
+regime label for 2014-01-02 needs the VIX close on 2013-12-31. Downloading only from
+2014-01-01 makes both NaN, which would silently shorten the locked training window by a
+day and leave the first row unusable.
+
+Resolution: raw data is downloaded from `DOWNLOAD_START = 2013-12-01`, and
+`build_analysis_frame` computes every derived column on the full joined history and
+*then* trims to `[SAMPLE_START, SAMPLE_END]`. The buffer feeds the lag and nothing else;
+no buffer row reaches the backtest, and the locked windows are unchanged. The committed
+raw CSVs therefore start at 2013-12-02 (the first trading day at or after
+`DOWNLOAD_START`) while the analysis frame starts at 2014-01-02 as locked. Verified by
+`test_analysis_frame_is_trimmed_to_the_sample_window_but_lags_use_the_buffer`.
+
+**Signature change (flagged, per the Stage 1 note).**
+`build_analysis_frame` gains keyword-only `sample_start` and `sample_end` parameters,
+defaulting to the locked constants. Needed to implement D8 and to let tests build frames
+over synthetic date ranges. No positional argument changed.
+
+**Interpretation of `DataQualityReport.missing_dates_spy`.**
+The Stage 1 docstring said "SPY dates present in the requested range but absent from the
+download", which is not computable without a trading-day calendar; a naive business-day
+comparison would report every market holiday as a data problem. Redefined as *dates on
+which ^VIX traded but SPY has no bar*, which is a genuine gap rather than a holiday.
+`calendar_mismatch_dates` covers disagreements in both directions and remains the
+authoritative list of dropped rows.
+
+**Deviation in the look-ahead test's construction.**
+`docs/implementation_plan.md` §2.3.6 says to corrupt every input row "from `t` onward"
+and assert row `t` is unchanged. That cannot hold as written: row `t`'s `log_return` and
+`parkinson_var` are by definition functions of row `t`'s own inputs, so NaN-ing row `t`
+changes them for a reason that is not look-ahead. Implemented as: corrupt every input
+row **strictly after** `t`, assert every row at or before `t` is bit-identical. The
+complementary direction — that the regime on `t` ignores the VIX close on `t` — is
+asserted by a separate test, so the lag is still covered from both sides.
+
 ---
 
 ## 2. Changelog
@@ -202,3 +242,86 @@ Also recorded in the plan, as implementation hazards rather than decisions:
   producing entirely plausible output. Guarded by a dedicated test.
 - Paired resampling in the bootstrap. Independent resampling inflates intervals and
   fails in the safe-looking direction.
+
+### Stage 2 — `src/data.py` (2026-08-22)
+
+First stage with real logic. Implemented the whole of `src/data.py`, the `data` stage of
+`run_all.py`, and `tests/test_data.py`. **Still no model, no forecast, no result.**
+
+Downloaded and committed the raw snapshot:
+
+| File | Rows | Range | Purpose |
+|---|---|---|---|
+| `data/raw/SPY.csv` | 2911 | 2013-12-02 .. 2025-06-30 | prices, high/low |
+| `data/raw/VIX.csv` | 2911 | 2013-12-02 .. 2025-06-30 | regime labels |
+| `data/raw/manifest.json` | — | — | SHA-256 + row counts + ranges |
+
+Analysis frame: **2890 rows**, 2014-01-02 .. 2025-06-30. Train **756 rows**
+(2014-01-02 .. 2016-12-30); out-of-sample **2134 rows** (2017-01-03 .. 2025-06-30). The
+OOS count implies `ceil(2134 / 21) = 102` refits, matching the estimate in decision B1.
+
+Regime counts on the lagged VIX close: calm 1198, normal 1317, stressed 375. The
+stressed regime is 13% of the sample. That is enough for a coverage statement at the
+90% and 95% levels and thin for the 99% level and for the 99% VaR, where the expected
+exceedance count in the stressed subsample is single digits. Recorded now so the
+regime tables are read with the right expectations rather than discovering it at
+Stage 5; `summarise_by_regime` must report `n` for exactly this reason.
+
+Data quality findings, printed in full by `run_all.py --stage data`:
+
+- SPY and ^VIX calendars agree on **every** date in the sample. No rows dropped.
+- No date has `high <= low`; the Parkinson proxy is defined everywhere.
+- Six dates have an exactly zero log return: 2016-04-22, 2017-01-10, 2018-05-08,
+  2018-10-08, 2022-08-11, 2023-07-21. All are ordinary flat closes on liquid days
+  rather than stale-price artefacts, and all are retained. Noted because a zero return
+  sits at the centre of every predictive interval and will never register as a breach.
+
+Decisions recorded above as D8, plus a flagged signature change to
+`build_analysis_frame` and a documented redefinition of `missing_dates_spy`.
+
+**Tests: 55 pass** (20 structural, 35 new). `tests/test_smoke.py::test_stages_are_stubs`
+replaced by a parametrised `test_unimplemented_stages_still_raise` over the three
+remaining stub stages, so the scaffold's story stays accurate as stages land.
+
+The look-ahead tests were **mutation-checked** rather than merely observed to pass:
+
+1. Removing the lag from `assign_vix_regime` — caught by two tests.
+2. Demeaning `log_return` by a full-sample mean — *initially not caught*. The synthetic
+   SPY fixture used a constant-growth price path, so every daily return was identical
+   and a full-sample statistic was numerically invisible. The fixture now uses a seeded,
+   genuinely uneven return path, and the same mutation is caught at all four values of
+   `t`. Recorded because a look-ahead test that cannot fail is worse than no test: it
+   reports safety it never checked. The same check must be run against the Stage 4
+   master look-ahead test before its result is trusted.
+
+Acceptance criteria for Stage 2, all met: one download then cache-only reruns with no
+network access; manifest written and verified before the frame is built; the quality
+report printed in full with no date elided; frame saved to
+`data/processed/analysis_frame.csv`; raw CSVs and manifest committed.
+
+**Reproducibility bug found and fixed at Stage 2: line-ending conversion silently broke
+the committed snapshot.**
+
+This machine has `core.autocrlf=true` and the repository had no `.gitattributes`. Git
+therefore rewrites LF to CRLF on **checkout**. The raw CSVs are written with LF and are
+hashed byte-for-byte by `manifest.json`, so a fresh clone would receive different bytes,
+every SHA-256 would mismatch, and `load_raw` would raise — correctly, but the effect is
+that the pipeline could not be run from a clone at all. The entire point of decision B3
+was defeated by a Git default.
+
+The failure is invisible in the authoring worktree, because those files were produced by
+a write rather than by a checkout. It was confirmed by actually cloning the repository:
+both CSVs arrived with 2,912 CRLF line endings and both hashes failed.
+
+Fix: added `.gitattributes` marking `data/raw/*.csv` and `data/raw/*.json` as `-text`,
+which freezes their bytes on every platform. Re-verified by cloning again: 0 CRLF, both
+hashes match. Deliberately scoped to `data/raw/` only — normalising the whole repository's
+line endings is a separate change and would rewrite every source file.
+
+Guarded by `test_snapshot_bytes_are_lf_only`, alongside
+`test_committed_snapshot_matches_its_manifest` which would fail outright in an affected
+clone. **Tests: 56 pass.**
+
+General lesson, applicable to the remaining stages: an integrity check that has never
+been observed to fail is not evidence that it works. Both the look-ahead tests and the
+hash verification were checked here by deliberately breaking the thing they guard.

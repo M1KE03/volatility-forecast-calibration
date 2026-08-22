@@ -81,15 +81,20 @@ def test_entry_point_parser_builds() -> None:
     assert set(run_all.STAGES) == set(run_all.STAGE_ORDER)
 
 
-def test_stages_are_stubs() -> None:
-    """Every stage is still an unimplemented stub.
+# Stages that have not landed yet. Entries are removed as each stage is implemented;
+# `data` was removed at Stage 2. Behaviour for an implemented stage is tested in that
+# stage's own test module, not here.
+UNIMPLEMENTED_STAGES = ["backtest", "evaluate", "figures"]
 
-    This test is expected to be deleted, one stage at a time, as stages land. Its
-    failure is a signal to update the scaffold's story, not a bug.
+
+@pytest.mark.parametrize("stage_name", UNIMPLEMENTED_STAGES)
+def test_unimplemented_stages_still_raise(stage_name: str) -> None:
+    """Stages not yet built fail loudly rather than appearing to succeed.
+
+    This list shrinks by one entry per stage. Its failure is a signal to update the
+    scaffold's story, not a bug.
     """
     run_all = importlib.import_module("run_all")
-    parser = run_all.build_parser()
-    args = parser.parse_args(["--stage", "data"])
-    for name, fn in run_all.STAGES.items():
-        with pytest.raises(NotImplementedError):
-            fn(args)
+    args = run_all.build_parser().parse_args(["--stage", "data"])
+    with pytest.raises(NotImplementedError):
+        run_all.STAGES[stage_name](args)

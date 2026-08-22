@@ -8,9 +8,13 @@ Scope note: this document does not introduce any new model, feature, metric, or 
 beyond the locked design. Where something is genuinely undecided it is marked
 **DECISION REQUIRED** and left undecided rather than resolved silently.
 
-**Status as of 2026-08-22:** Stage 1 complete (commit `80b8319`). 41 stubs across five
-modules, all raising `NotImplementedError`. 20 structural tests pass. No research logic
-exists.
+**Status as of 2026-08-22:** Stage 2 complete. `src/data.py` is implemented and the
+analysis frame is built (2890 rows; 756 train, 2134 out-of-sample). 55 tests pass.
+`models.py`, `backtest.py`, `evaluation.py` and `bootstrap.py` are still stubs. No model,
+no forecast, no result exists yet.
+
+Next: **Stage 3**, whose frequentist half and baselines are unblocked. Its Bayesian half
+needs **D4** (priors) and **D6** (draws retained).
 
 ---
 
@@ -35,12 +39,18 @@ Two further decisions surfaced while specifying the stages below:
 
 ---
 
-## Stage 2 — `src/data.py`
+## Stage 2 — `src/data.py` — **DONE (2026-08-22)**
 
 **Objective:** turn Yahoo Finance downloads into one verified analysis frame, and prove
 by test that nothing in it looks forward.
 
-**Depends on:** nothing. Can start immediately.
+**Depends on:** nothing.
+
+Outcome, with the deviations from this specification recorded in `research_log.md` 1.4
+(decision D8, the `build_analysis_frame` signature change, the redefinition of
+`missing_dates_spy`, and the corrected wording of look-ahead test 6): calendars agree on
+every sample date, no rows dropped, Parkinson defined everywhere, six exactly-zero
+returns retained and listed. Regimes: calm 1198, normal 1317, stressed 375.
 
 ### 2.1 Functions
 
@@ -510,12 +520,13 @@ protects its arithmetic.
 
 | Stage | Module | Blocked by | Can start |
 |---|---|---|---|
-| 2 | `data.py` | — | **now** |
-| 3 | `models.py` | D4 (Bayesian half only) | frequentist half now |
+| 2 | `data.py` | — | **done** |
+| 3 | `models.py` | D4, D6 (Bayesian half only) | **now** |
 | 4 | `backtest.py` | D1, Stage 3 | after 3 |
 | 5 | `evaluation.py` | D2, D3, Stage 4 | after 4 |
 | 6 | `bootstrap.py` | Stage 5 | after 5 |
 | 7 | figures, notebooks | Stages 2–6 | after 6 |
 | 8 | report | all | last |
 
-Stages 2 and 3 are the only ones that can begin without a further decision from you.
+Stage 2 is done. Stage 3's frequentist half and baselines can proceed now; its
+Bayesian half needs D4 and D6.

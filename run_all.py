@@ -6,9 +6,9 @@ Usage
     python run_all.py --stage data
     python run_all.py --all
 
-Every stage is currently an unimplemented stub and raises ``NotImplementedError``.
-That is the intended state at this point in the project: the interfaces exist so they
-can be reviewed before any implementation is written.
+``data`` is implemented (Stage 2). ``backtest``, ``evaluate`` and ``figures`` are still
+stubs and raise ``NotImplementedError``: their interfaces exist so they can be reviewed
+before any implementation is written.
 
 Stages run in the order listed and each depends on its predecessor's artefacts in
 ``data/processed/``.

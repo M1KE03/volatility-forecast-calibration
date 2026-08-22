@@ -1,0 +1,11 @@
+# The committed raw snapshots in data/raw/ are hashed byte-for-byte by
+# data/raw/manifest.json, and src/data.py refuses to load a file whose hash does not
+# match (decision B3). This machine has core.autocrlf=true, so without the rule below
+# Git rewrites LF to CRLF on checkout: a fresh clone would receive different bytes,
+# every SHA-256 would mismatch, and `run_all.py --stage data` would refuse to run.
+#
+# Verified: before this file existed, `git clone` produced SPY.csv and VIX.csv with 2912
+# CRLF line endings each and both hashes failed. -text freezes the bytes exactly as
+# committed, on every platform.
+data/raw/*.csv   -text
+data/raw/*.json  -text

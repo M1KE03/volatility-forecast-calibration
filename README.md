@@ -1,6 +1,8 @@
 # Trusting the Error Bars: Calibration of Frequentist vs Bayesian Volatility Forecasts
 
-**Status: scaffold only. No results exist yet. Every function in `src/` is an unimplemented stub.**
+**Status: Stage 2 complete. The data layer is built and verified; no model, forecast or
+result exists yet. `models.py`, `backtest.py`, `evaluation.py` and `bootstrap.py` are
+still unimplemented stubs.**
 
 ## Research question
 
@@ -97,11 +99,27 @@ Requires Python 3.12. No system C/C++ compiler is needed.
 
 ```bash
 python run_all.py --help            # list pipeline stages
-python run_all.py --stage data      # run one stage
+python run_all.py --stage data      # build the analysis frame (implemented)
 python run_all.py --all             # run the full pipeline
 ```
 
-All stages currently raise `NotImplementedError`. This is intentional at this point.
+`--stage data` uses the committed snapshot in `data/raw/` and makes no network call;
+pass `--refresh` to re-download, which deliberately replaces that snapshot. It prints the
+full data quality report and writes `data/processed/analysis_frame.csv`.
+
+The `backtest`, `evaluate` and `figures` stages still raise `NotImplementedError`.
+
+### The analysis frame
+
+2,890 trading days, 2014-01-02 to 2025-06-30: 756 training rows (2014-01-02 to
+2016-12-30) and 2,134 out-of-sample rows (2017-01-03 to 2025-06-30), implying 102 refits
+at the locked 21-day cadence. Regime counts on the lagged VIX close are calm 1,198,
+normal 1,317, stressed 375 — the stressed regime is 13% of the sample, which is thin for
+the 99% level and for the 99% VaR and is why every regime table reports `n`.
+
+Raw data is downloaded from 2013-12-01, one month before the sample start, so that the
+lagged quantities are defined on the first in-sample row. The buffer feeds the lag only
+and never reaches the analysis frame (decision D8 in `research_log.md`).
 
 ## Repository layout
 
