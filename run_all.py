@@ -40,8 +40,62 @@ STAGE_HELP: dict[str, str] = {
 
 
 def stage_data(args: argparse.Namespace) -> None:
-    """Build the analysis frame from cached or freshly downloaded raw data."""
-    raise NotImplementedError("stage 'data' not implemented")
+    """Build the analysis frame from cached or freshly downloaded raw data.
+
+    Downloads only when a snapshot is absent, or when ``--refresh`` is passed. The
+    committed snapshot is never replaced by a routine run (decision B3).
+    """
+    from src import data as D
+
+    RAW_DIR.mkdir(parents=True, exist_ok=True)
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+
+    downloaded = False
+    for ticker in (D.SPY_TICKER, D.VIX_TICKER):
+        path = RAW_DIR / D.cache_filename(ticker)
+        if path.exists() and not args.refresh:
+            print(f"cache hit : {path.name} (no network access)")
+            continue
+        print(f"downloading {ticker} {D.DOWNLOAD_START}..{D.SAMPLE_END} -> {path.name}")
+        D.download_raw(
+            ticker, D.DOWNLOAD_START, D.SAMPLE_END, RAW_DIR, refresh=args.refresh
+        )
+        downloaded = True
+
+    manifest_path = RAW_DIR / D.MANIFEST_NAME
+    if downloaded or not manifest_path.exists():
+        D.write_manifest(RAW_DIR)
+        print(f"manifest written: {manifest_path.name}")
+
+    status = D.verify_manifest(RAW_DIR)
+    for name, ok in status.items():
+        print(f"sha256 {'OK  ' if ok else 'FAIL'} {name}")
+    if not all(status.values()):
+        raise SystemExit("manifest verification failed; refusing to build on altered data")
+
+    spy = D.load_raw(D.SPY_TICKER, RAW_DIR, verify=True)
+    vix = D.load_raw(D.VIX_TICKER, RAW_DIR, verify=True)
+    frame, report = D.build_analysis_frame(spy, vix)
+
+    # Printed in full, never summarised away: any dropped date must be visible.
+    print(report.format_full())
+
+    train, oos = D.split_train_oos(frame)
+    print(
+        f"analysis frame : {frame.index.min().date()} .. {frame.index.max().date()} "
+        f"({len(frame)} rows)"
+    )
+    print(f"  train : {train.index.min().date()} .. {train.index.max().date()} "
+          f"({len(train)} rows)")
+    print(f"  oos   : {oos.index.min().date()} .. {oos.index.max().date()} "
+          f"({len(oos)} rows)")
+    print("  regime counts (lagged VIX):")
+    for label, count in frame["regime"].value_counts().sort_index().items():
+        print(f"    {label:<9} {count}")
+
+    out = PROCESSED_DIR / "analysis_frame.csv"
+    frame.to_csv(out, index_label="date", date_format="%Y-%m-%d", lineterminator="\n")
+    print(f"wrote {out}")
 
 
 def stage_backtest(args: argparse.Namespace) -> None:

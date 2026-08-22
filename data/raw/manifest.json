@@ -1,0 +1,16 @@
+{
+  "SPY.csv": {
+    "sha256": "210b0795ee01951b02522a805235dab486efaf8a5833edfdbfd8bc775ae357af",
+    "n_rows": 2911,
+    "first_date": "2013-12-02",
+    "last_date": "2025-06-30",
+    "downloaded_utc": "2026-08-22T15:14:14+00:00"
+  },
+  "VIX.csv": {
+    "sha256": "5e463f0bc3431cf49c70da9d795f2e8dbed49f3e9b7007c85ce64f6c90bf1379",
+    "n_rows": 2911,
+    "first_date": "2013-12-02",
+    "last_date": "2025-06-30",
+    "downloaded_utc": "2026-08-22T15:14:14+00:00"
+  }
+}
