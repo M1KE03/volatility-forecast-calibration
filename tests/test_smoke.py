@@ -41,6 +41,7 @@ EXPECTED_DIRS = [
     "notebooks",
     "figures",
     "report",
+    "docs",
 ]
 
 EXPECTED_FILES = [
@@ -49,6 +50,7 @@ EXPECTED_FILES = [
     "run_all.py",
     "research_log.md",
     "report/report.md",
+    "docs/implementation_plan.md",
 ]
 
 

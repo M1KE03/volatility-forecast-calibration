@@ -116,6 +116,16 @@ the Bayesian intervals and could manufacture the result. Priors and support cons
 written into this log and frozen **before any out-of-sample result is computed**. Prior
 sensitivity belongs in `03_robustness`. **Not yet decided.**
 
+**D6 — Posterior draws carried through the backtest. Blocks `models.py`/`backtest.py`.**
+Default sampler settings retain 12,800 draws; carrying that many variance paths across
+~2,140 daily steps is wasteful. Proposal: thin to a fixed 2,000 draws for the predictive
+stage. Compute/accuracy tradeoff, no modelling content. **Not yet decided.**
+
+**D7 — Reference distribution for baseline intervals. Blocks `backtest.py`.**
+The baselines yield a variance forecast but no innovation distribution, yet they need
+intervals to be comparable on coverage. Proposal: Gaussian reference. Fitting a
+Student-t would promote them from baselines to competitors. **Not yet decided.**
+
 ---
 
 ## 2. Changelog
@@ -157,3 +167,38 @@ Created a complete but entirely unimplemented skeleton. **No research logic, no 
 Known consequence: the Stage 1 signatures will not be perfect and some will be revised in
 later stages. Every signature change will be called out explicitly rather than made
 quietly.
+
+### Stage 1a — Implementation plan (2026-08-22)
+
+Added `docs/implementation_plan.md`: a function-by-function specification of Stages 2-8,
+each with its formula, its dominant failure mode, its tests, and its acceptance
+criteria. No code, no design change.
+
+Note: this adds a `docs/` directory, which is not in the locked target repository
+structure. Flagged rather than assumed; the file can be moved to the repository root or
+under `report/` on request.
+
+Two decisions surfaced while writing the specification and are recorded as open:
+
+**D6 — Number of posterior draws carried through the backtest. Blocks Stages 3-4.**
+Default sampler settings retain 32 x (3000-1000)/5 = 12,800 draws. Carrying that many
+variance paths across ~2,140 daily forecast steps is wasteful. Proposal: thin to a fixed
+2,000 draws for the predictive stage. A compute/accuracy tradeoff with no modelling
+content, but it should be recorded rather than left to accident. **Not yet decided.**
+
+**D7 — Reference distribution for the baselines' predictive intervals. Blocks Stage 4.**
+The two baselines produce a variance forecast but no innovation distribution, yet they
+need intervals to be comparable on coverage. Proposal: a Gaussian reference. Fitting a
+Student-t to the baselines would quietly promote them from baselines to competitors and
+would muddy what the GARCH comparison is actually demonstrating. **Not yet decided.**
+
+Also recorded in the plan, as implementation hazards rather than decisions:
+- The `-0.5*ln(h_t)` Jacobian term in the t log-likelihood. Omitting it still optimises
+  and still looks plausible, but every variance estimate is wrong.
+- The `sqrt((nu-2)/nu)` standardisation factor in predictive quantiles. Dropping it
+  inflates intervals and would bias the central comparison toward the Bayesian model.
+- `h_next` must vary across posterior draws. A single shared value collapses the
+  posterior predictive onto the plug-in and destroys the research question while
+  producing entirely plausible output. Guarded by a dedicated test.
+- Paired resampling in the bootstrap. Independent resampling inflates intervals and
+  fails in the safe-looking direction.

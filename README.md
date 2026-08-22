@@ -52,7 +52,9 @@ Explicitly **out of scope** in the core version: LSTM, Transformer, stochastic
 volatility, macro variables, multiple assets, dashboards.
 
 The full decision register, including decisions made during scaffolding and the
-items still open, is in [`research_log.md`](research_log.md).
+items still open, is in [`research_log.md`](research_log.md). A function-by-function
+specification of the remaining work is in
+[`docs/implementation_plan.md`](docs/implementation_plan.md).
 
 ## Quantities that must not be conflated
 
@@ -109,6 +111,8 @@ All stages currently raise `NotImplementedError`. This is intentional at this po
 ├── requirements.txt
 ├── run_all.py             # single entry point
 ├── research_log.md        # decision register + changelog
+├── docs/
+│   └── implementation_plan.md   # function-by-function spec of remaining work
 ├── data/
 │   ├── raw/               # committed price snapshots + SHA-256 manifest
 │   └── processed/         # derived, gitignored, regenerable
