@@ -65,8 +65,16 @@ def apply_house_style() -> None:
 
 
 def shade_stress_periods(ax: Axes, *, label: bool = True) -> None:
-    """Shade the known stress episodes on a date axis."""
+    """Shade the known stress episodes on a date axis.
+
+    Periods lying entirely outside the axis's current x-limits are skipped. Without
+    that guard, drawing a 2022 span on a chart of spring 2020 silently stretches the
+    axis out to 2022 and squashes the window the figure exists to show.
+    """
+    lo, hi = ax.get_xlim()
     for start, end, name in STRESS_PERIODS:
+        if mdates.date2num(pd.Timestamp(end)) < lo or mdates.date2num(pd.Timestamp(start)) > hi:
+            continue
         # Matplotlib accepts datetimes on a date axis but types axvspan as float, so the
         # conversion is made explicit rather than relying on the runtime coercion.
         ax.axvspan(
@@ -258,4 +266,105 @@ def plot_vix_with_regimes(frame: pd.DataFrame, out_path: Path) -> Path:
     ax.xaxis.set_major_locator(mdates.YearLocator())
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
     ax.margins(x=0.01)
+    return _finish(fig, out_path)
+
+
+# --- Stage 1 figures ---------------------------------------------------------------
+
+#: Display labels for the model keys used in the forecast frame.
+MODEL_LABELS = {
+    "yesterday": "RW-in-vol (yesterday's scaled Parkinson)",
+    "ewma": "EWMA (RiskMetrics, lambda = 0.94)",
+    "garch_mle": "GARCH(1,1)-t, plug-in",
+    "garch_bayes": "GARCH(1,1)-t, posterior predictive",
+}
+
+MODEL_COLOURS = {
+    "yesterday": "#8a8f98",
+    "ewma": "#b5482e",
+    "garch_mle": "#31456b",
+    "garch_bayes": "#2e7d6b",
+}
+
+
+def plot_forecasts_vs_realised(
+    forecasts: pd.DataFrame,
+    frame: pd.DataFrame,
+    out_path: Path,
+    *,
+    start: str,
+    end: str,
+) -> Path:
+    """Forecast volatility against the realised proxy over a window.
+
+    The Stage 1 acceptance check. An EWMA forecast is a weighted average of past squared
+    returns, so it *must* lag a volatility spike on the way in and overshoot on the way
+    out -- it has no mechanism to do anything else. If the plotted line instead tracked
+    the spike contemporaneously, the recursion would be reading the current day's return
+    and the whole backtest would be leaking one day. That failure is far easier to see
+    here than in any summary statistic, which is why the plot is an acceptance criterion
+    and not a decoration.
+
+    Everything is drawn as annualised volatility rather than variance: variance on a
+    crisis window is unreadable, since a 5x volatility move is a 25x variance move.
+    """
+    apply_house_style()
+
+    lo, hi = pd.Timestamp(start), pd.Timestamp(end)
+    window = forecasts.loc[lo:hi]
+    if window.empty:
+        raise ValueError(f"no forecasts between {start} and {end}")
+
+    def annualise(variance: pd.Series) -> pd.Series:
+        return np.sqrt(variance.astype(float) * 252.0)
+
+    fig, (ax, ax_r) = plt.subplots(
+        2, 1, figsize=(10.0, 5.6), sharex=True, height_ratios=[3, 1]
+    )
+
+    realised = window[window.model == window.model.iloc[0]]["proxy_var"]
+    ax.fill_between(
+        realised.index,
+        0.0,
+        annualise(realised).to_numpy(),
+        color=COLOURS["muted"],
+        alpha=0.30,
+        linewidth=0,
+        label="realised (scaled Parkinson, annualised)",
+    )
+
+    for model in window.model.unique():
+        sub = window[window.model == model]
+        ax.plot(
+            sub.index,
+            annualise(sub["variance"]).to_numpy(),
+            linewidth=1.5,
+            color=MODEL_COLOURS.get(str(model), COLOURS["returns"]),
+            label=MODEL_LABELS.get(str(model), str(model)),
+        )
+
+    # Pin the limits to the requested window before shading, then restore them after,
+    # so no annotation can widen the view past what was asked for.
+    ax.set_xlim(mdates.date2num(lo), mdates.date2num(hi))
+    shade_stress_periods(ax, label=False)
+    ax.set_xlim(mdates.date2num(lo), mdates.date2num(hi))
+
+    ax.set_title(
+        "One-day-ahead forecasts against realised volatility: "
+        "EWMA lags into the spike and overshoots after"
+    )
+    ax.set_ylabel("annualised volatility")
+    ax.legend(loc="upper left")
+
+    returns = frame.loc[lo:hi, "log_return"]
+    ax_r.plot(returns.index, returns.to_numpy(), linewidth=0.7, color=COLOURS["returns"])
+    ax_r.axhline(0.0, color="black", linewidth=0.6)
+    ax_r.set_ylabel("log return")
+    ax_r.set_xlim(mdates.date2num(lo), mdates.date2num(hi))
+    ax_r.xaxis.set_major_locator(mdates.MonthLocator())
+    ax_r.xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
+    for tick in ax_r.get_xticklabels():
+        tick.set_fontsize(7)
+
+    fig.tight_layout()
     return _finish(fig, out_path)

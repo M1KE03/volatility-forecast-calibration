@@ -82,9 +82,9 @@ def test_entry_point_parser_builds() -> None:
 
 
 # Stages that have not landed yet. Entries are removed as each stage is implemented;
-# `data` was removed at Stage 0. Behaviour for an implemented stage is tested in that
-# stage's own test module, not here.
-UNIMPLEMENTED_STAGES = ["backtest", "evaluate", "figures"]
+# `data` and `eda` were removed at Stage 0, `backtest` at Stage 1. Behaviour for an
+# implemented stage is tested in that stage's own test module, not here.
+UNIMPLEMENTED_STAGES = ["evaluate", "figures"]
 
 
 @pytest.mark.parametrize("stage_name", UNIMPLEMENTED_STAGES)

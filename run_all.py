@@ -158,8 +158,50 @@ def stage_eda(args: argparse.Namespace) -> None:
 
 
 def stage_backtest(args: argparse.Namespace) -> None:
-    """Run the walk-forward backtest and persist forecasts and refit diagnostics."""
-    raise NotImplementedError("stage 'backtest' not implemented")
+    """Run the walk-forward backtest and persist forecasts and refit diagnostics.
+
+    Stage 1 produces the two baselines. The GARCH models join the same loop at Stages 2
+    and 3 without the loop itself changing.
+    """
+    import pandas as pd
+
+    from src import backtest as B
+    from src import figures
+
+    frame_path = PROCESSED_DIR / "analysis_frame.csv"
+    if not frame_path.exists():
+        raise SystemExit(
+            f"{frame_path} not found. Run `python run_all.py --stage data` first."
+        )
+    frame = pd.read_csv(frame_path, index_col=0, parse_dates=True)
+
+    config = B.BacktestConfig(mcmc_seed=args.seed)
+    print(f"proxy scale c = {config.proxy_scale_c:.6f}  (frozen, warm-up only)")
+    forecasts, records = B.run_backtest(frame, config)
+
+    print(f"models    : {', '.join(B.BASELINE_MODELS)}")
+    print(f"refits    : {len(records)} at a {config.refit_every}-day cadence")
+    for model in B.BASELINE_MODELS:
+        sub = forecasts[forecasts.model == model]
+        ann = (sub["variance"].mean() * 252) ** 0.5
+        print(
+            f"  {model:<10} {len(sub):,} rows, "
+            f"{sub['variance'].notna().sum():,} finite, "
+            f"mean annualised vol {ann:.2%}"
+        )
+
+    written = B.save_forecasts(forecasts, records, config, PROCESSED_DIR)
+    for path in written:
+        print(f"wrote {path}")
+
+    fig_path = figures.plot_forecasts_vs_realised(
+        forecasts,
+        frame,
+        FIGURES_DIR / "05_baseline_forecasts_covid.png",
+        start="2019-11-01",
+        end="2020-06-30",
+    )
+    print(f"wrote {fig_path}")
 
 
 def stage_evaluate(args: argparse.Namespace) -> None:

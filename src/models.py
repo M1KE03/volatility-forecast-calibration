@@ -37,16 +37,99 @@ with omega > 0, alpha >= 0, beta >= 0, alpha + beta < 1, nu > 4. The nu > 4 cons
 variance so that ``h_t`` is the conditional variance itself, not a scale parameter that
 must be rescaled by nu/(nu-2) downstream.
 
-All stubs. Priors are open item D4 and must be frozen in research_log.md before any
-out-of-sample result is computed.
+Scale convention
+----------------
+Every variance in this module is on the **close-to-close return-variance scale**, so
+that a predictive interval built from it can be compared against an observed return.
+The Parkinson proxy does not arrive on that scale; ``data.scale_proxy`` converts it
+before it reaches ``forecast_yesterday_volatility``. See ``data.PROXY_SCALE_C``.
+
+Status: the GARCH half is still stubbed. The predictive-distribution interface and both
+baselines are implemented (Stage 1). Priors are set at Stage 3 and must be frozen in
+research_log.md before any out-of-sample result is computed.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
 
 import numpy as np
 import pandas as pd
+from scipy import stats
+
+# --- The forecaster interface -----------------------------------------------------
+#
+# Every model in this project -- baseline or GARCH, frequentist or Bayesian -- is
+# consumed by the backtest through this one interface. That is deliberate: if the
+# baselines took a different path from the models under test, a difference in their
+# measured calibration could be an artefact of the plumbing rather than of the
+# forecasts, and the project's headline comparison would be unfalsifiable.
+#
+# A forecast for day t+1 is a variance, a predictive mean, and a predictive
+# distribution over tomorrow's *return*. The distribution exposes exactly two
+# operations, which are all the evaluation layer needs:
+#
+#   quantile(q) -> the interval bounds at 90/95/99% and the one-sided 99% VaR
+#   cdf(r)      -> the PIT value at the realised return
+#
+# The PIT is computed once, by the harness, from ``cdf``. No model computes its own,
+# so no model can compute it a different way.
+
+
+class PredictiveDistribution(Protocol):
+    """One-day-ahead predictive distribution over the **return**."""
+
+    def quantile(self, q: np.ndarray) -> np.ndarray:
+        """Return quantiles at probabilities ``q``."""
+        ...
+
+    def cdf(self, r: float) -> float:
+        """Return ``F(r)`` -- the PIT value when ``r`` is the realised return."""
+        ...
+
+
+@dataclass(frozen=True)
+class NormalPredictive:
+    """Gaussian predictive distribution, used by both baselines.
+
+    The governing plan specifies normal intervals for EWMA -- it is the "naive UQ"
+    baseline, and the point of a baseline is to be naive in a way the real models are
+    not. ``forecast_yesterday_volatility`` is given the same treatment for consistency,
+    so that the two baselines differ only in how they estimate variance and not in how
+    they turn a variance into an interval.
+    """
+
+    mean: float
+    variance: float
+
+    def __post_init__(self) -> None:
+        if not np.isfinite(self.variance) or self.variance <= 0.0:
+            raise ValueError(f"variance must be finite and positive, got {self.variance!r}")
+
+    @property
+    def sd(self) -> float:
+        return float(np.sqrt(self.variance))
+
+    def quantile(self, q: np.ndarray) -> np.ndarray:
+        return np.asarray(stats.norm.ppf(q, loc=self.mean, scale=self.sd), dtype=float)
+
+    def cdf(self, r: float) -> float:
+        return float(stats.norm.cdf(r, loc=self.mean, scale=self.sd))
+
+
+@dataclass(frozen=True)
+class Forecast:
+    """One model's one-day-ahead forecast for one date.
+
+    ``variance`` is on the close-to-close return-variance scale, the same scale as the
+    (rescaled) evaluation proxy, so it is directly comparable across all four models.
+    """
+
+    variance: float
+    mean: float
+    distribution: PredictiveDistribution
+
 
 # --- Parameter handling -----------------------------------------------------------
 
@@ -173,12 +256,20 @@ def garch11_t_loglik(theta: np.ndarray, returns: np.ndarray, h0: float) -> float
 def log_prior(theta: np.ndarray) -> float:
     """Log prior over (mu, omega, alpha, beta, nu). Returns ``-inf`` outside support.
 
-    Open item D4: the priors are **not yet chosen**. They must be specified and frozen
-    in research_log.md before any out-of-sample result is computed, because loose
-    priors widen the Bayesian predictive intervals and could manufacture the paper's
-    headline finding.
+    **The priors are not yet chosen.** They must be specified and frozen in
+    research_log.md before any out-of-sample result is computed, because loose priors
+    widen the Bayesian predictive intervals and could manufacture the project's headline
+    finding — that integrating over parameter uncertainty improves interval coverage.
+    Choosing them after seeing a coverage table would make that finding unfalsifiable.
+
+    Under decision B1-R the sampler is PyMC/NUTS, which takes its priors as distribution
+    objects in the model graph rather than through this function. This entry point is
+    retained for the route-B fallback (emcee), where the target density must be assembled
+    by hand. Whichever path is used, the priors themselves are the same and are recorded
+    once. See ``docs/handoff.md`` for the candidate specification carried over from the
+    Stage 3 feasibility probe.
     """
-    raise NotImplementedError("log_prior — priors not yet specified, see D4")
+    raise NotImplementedError("log_prior - priors not yet specified; see docs/handoff.md")
 
 
 def log_posterior(theta: np.ndarray, returns: np.ndarray, h0: float) -> float:
@@ -289,8 +380,20 @@ def forecast_yesterday_volatility(realised_var: pd.Series) -> pd.Series:
     """Baseline 1: tomorrow's variance forecast is today's realised variance.
 
     A pure one-step lag. Included as the floor any real model must clear.
+
+    ``realised_var`` must **already be on the close-to-close return-variance scale** --
+    that is, ``data.scale_proxy(frame["parkinson_var"])``, not the raw Parkinson column.
+    Passing raw Parkinson would understate the variance by roughly a third and produce
+    intervals about 23% too narrow, so the resulting VaR breaches would be a units error
+    wearing the costume of a calibration failure. The harness does the conversion once,
+    centrally, and a test asserts the scaled series is what arrives here.
+
+    The output is indexed so that row ``t`` holds the forecast **for** day ``t``, built
+    from the observation at ``t-1``. The first row is therefore NaN.
     """
-    raise NotImplementedError("forecast_yesterday_volatility")
+    if not isinstance(realised_var.index, pd.DatetimeIndex):
+        raise TypeError("realised_var must have a DatetimeIndex")
+    return realised_var.shift(1).rename("variance")
 
 
 def forecast_ewma(
@@ -302,7 +405,45 @@ def forecast_ewma(
     """Baseline 2: EWMA / RiskMetrics recursion.
 
     ``h_{t+1} = lam * h_t + (1 - lam) * r_t^2``, with ``lam`` fixed at the RiskMetrics
-    value rather than estimated, so the baseline stays a genuine baseline.
-    ``initial_var`` is seeded from the training window only.
+    value rather than estimated, so the baseline stays a genuine baseline. Because the
+    recursion is driven by squared **returns**, this baseline is already on the
+    close-to-close scale and needs no rescaling -- unlike baseline 1.
+
+    ``initial_var`` seeds ``h`` at the first observation and must be computed from the
+    training window only; when omitted it is the sample variance of the ``returns``
+    passed in, so the caller is responsible for passing training-window data. The
+    harness passes the warm-up block, and a test asserts the seed cannot move when
+    out-of-sample returns change.
+
+    As with baseline 1, row ``t`` of the output is the forecast **for** day ``t``, using
+    returns through ``t-1`` only. The first row is NaN.
     """
-    raise NotImplementedError("forecast_ewma")
+    if not isinstance(returns.index, pd.DatetimeIndex):
+        raise TypeError("returns must have a DatetimeIndex")
+    if not 0.0 < lam < 1.0:
+        raise ValueError(f"lam must lie strictly in (0, 1), got {lam!r}")
+
+    values = returns.to_numpy(dtype=float)
+    n = values.size
+    if initial_var is None:
+        finite = values[np.isfinite(values)]
+        if finite.size < 2:
+            raise ValueError("need at least two finite returns to seed the EWMA")
+        initial_var = float(np.var(finite, ddof=1))
+    if not np.isfinite(initial_var) or initial_var <= 0.0:
+        raise ValueError(f"initial_var must be finite and positive, got {initial_var!r}")
+
+    # ``h[t]`` is the forecast FOR day t, so it is written before day t's return is
+    # read. Advancing h and then assigning it to the same index position would make the
+    # forecast for day t depend on the return of day t -- the single most consequential
+    # off-by-one available in this module, and the reason the ordering below is explicit
+    # rather than a vectorised ewm() call.
+    out = np.full(n, np.nan, dtype=float)
+    h = float(initial_var)
+    for t in range(n):
+        if t > 0:
+            r_prev = values[t - 1]
+            if np.isfinite(r_prev):
+                h = lam * h + (1.0 - lam) * r_prev**2
+            out[t] = h
+    return pd.Series(out, index=returns.index, name="variance")

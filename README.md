@@ -1,9 +1,9 @@
 # Trusting the Error Bars: Calibration of Frequentist vs Bayesian Volatility Forecasts
 
-**Status: Stage 0 complete. The data layer is built and verified and the EDA
-establishes, by test, that the data warrants a conditional-variance model. No model,
-forecast or result exists yet: `models.py`, `backtest.py`, `evaluation.py` and
-`bootstrap.py` are still unimplemented stubs. Stage 1 (backtest harness + baselines) is
+**Status: Stage 1 complete. The walk-forward harness is built and its look-ahead audit
+passes; both baselines produce a complete forecast table over the 2,134-day evaluation
+window. Neither GARCH model exists yet: `evaluation.py` and `bootstrap.py` are still
+stubs and the GARCH half of `models.py` is stubbed. Stage 2 (frequentist GARCH) is
 next.**
 
 Stage numbers follow [`docs/project1-implementation-plan.md`](docs/project1-implementation-plan.md),
@@ -62,7 +62,18 @@ The plan of work is [`docs/project1-implementation-plan.md`](docs/project1-imple
 eight stages, a ~15-20h budget, and an ordered cut list. The full decision register,
 including decisions made during scaffolding and the items still open, is in
 [`research_log.md`](research_log.md); §1.5 there records the 2026-08-23 switch to this
-plan and the retirement of the earlier one, now in `docs/archive/`.
+plan and the retirement of the earlier one, which was deleted at the switch and
+survives only in git history (see `git log -- docs/implementation_plan.md`).
+
+For a problem-oriented view of the same history — every difficulty encountered, why it
+mattered, and the fix now in the repository — see
+[`docs/problems-and-solutions.md`](docs/problems-and-solutions.md). It covers the
+look-ahead hazards, the proxy scale mismatch, the environment and toolchain work, and a
+set of test-integrity lessons that generalise beyond this project.
+
+**Picking this up cold?** [`docs/handoff.md`](docs/handoff.md) is the entry point: what
+exists, what is next, which rules are not revisable, and the specific traps that do damage
+while looking fine.
 
 ## Quantities that must not be conflated
 
@@ -125,6 +136,7 @@ SHA-256, and why this replaced the earlier compiler-free design are in `research
 python run_all.py --help            # list pipeline stages
 python run_all.py --stage data      # build the analysis frame (implemented)
 python run_all.py --stage eda       # ARCH-LM, Ljung-Box, ADF + Stage 0 figures (implemented)
+python run_all.py --stage backtest  # walk-forward loop + the two baselines (implemented)
 python run_all.py --all             # run the full pipeline
 ```
 
@@ -132,7 +144,55 @@ python run_all.py --all             # run the full pipeline
 pass `--refresh` to re-download, which deliberately replaces that snapshot. It prints the
 full data quality report and writes `data/processed/analysis_frame.csv`.
 
-The `backtest`, `evaluate` and `figures` stages still raise `NotImplementedError`.
+The `evaluate` and `figures` stages still raise `NotImplementedError`.
+
+## The scale convention
+
+Every variance forecast in this project and the evaluation proxy are on the
+**close-to-close return-variance scale**. This is what makes the four models comparable
+to each other and their intervals comparable to observed returns.
+
+The Parkinson estimator is built from the intraday high/low range and so sees no part of
+the overnight move, which for SPY is a large share of daily variance. It understates
+close-to-close variance by roughly a third. The correction is a single constant estimated
+on the warm-up sample only and frozen:
+
+```
+c = mean(r^2) / mean(sigma^2_P) = 1.517318      (2014-01-02 .. 2016-12-30, n = 756)
+```
+
+Without it the error would pull in two directions at once: the RW baseline would be
+unfairly advantaged on QLIKE (its units match the raw proxy) while its intervals came out
+~23% too narrow, so it would win the point-forecast table and fail the calibration table
+for reasons having nothing to do with forecasting. Separately, QLIKE's proxy-robustness
+(Patton 2011) presumes an unbiased proxy.
+
+**What `c` does not do.** It removes the systematic level error but does *not* make the
+proxy conditionally unbiased -- within the warm-up alone the quarterly ratio ranges from
+1.18 to 1.94, and the overnight share plausibly co-moves with regime. The proxy is
+approximately unbiased *on average*; proxy-robustness is approached, not restored. Stage
+6 re-runs the QLIKE ranking on raw Parkinson to show the ranking does not hinge on `c`.
+
+## The look-ahead audit
+
+The single test the whole project's credibility rests on. It runs the backtest, corrupts
+every observation from a date `t` onward, re-runs, and asserts the forecasts are
+bit-identical before `t` -- at Volmageddon, the largest COVID drawdown day, and a 2022
+selloff.
+
+A precise distinction is built into it. Corrupting from `t` must leave the *forecast*
+columns unchanged up to and including `t`, because the forecast for `t` is built from
+data through `t-1`. It must **not** leave the *evaluation* columns at `t` unchanged --
+`log_return` and its `pit` are functions of day `t` itself. Asserting the stronger claim
+would be asserting something false, and would have to be weakened later, which is how a
+look-ahead test quietly stops testing anything.
+
+`test_corruption_actually_changes_the_future` sits beside it, because everything above
+would also hold for a backtest that ignored its input entirely.
+
+```bash
+pytest tests/test_backtest.py -q
+```
 
 ### What the EDA establishes
 
@@ -182,8 +242,9 @@ and never reaches the analysis frame (decision D8 in `research_log.md`).
 ├── run_all.py             # single entry point
 ├── research_log.md        # decision register + changelog
 ├── docs/
+│   ├── handoff.md                        # START HERE: state, next actions, traps
 │   ├── project1-implementation-plan.md   # governing plan: stages, budget, cut list
-│   └── archive/                          # superseded plans, kept as a record
+│   └── problems-and-solutions.md         # every difficulty hit so far, and its fix
 ├── data/
 │   ├── raw/               # committed price snapshots + SHA-256 manifest
 │   └── processed/         # derived, gitignored, regenerable

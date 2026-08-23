@@ -503,3 +503,97 @@ def split_train_oos(
     train_mask = (idx >= pd.Timestamp(train_start)) & (idx <= pd.Timestamp(train_end))
     oos_mask = (idx >= pd.Timestamp(oos_start)) & (idx <= pd.Timestamp(oos_end))
     return frame.loc[train_mask], frame.loc[oos_mask]
+
+
+# --- The proxy scale constant c ----------------------------------------------------
+#
+# Master convention (locked 2026-08-23): every variance forecast in this project and the
+# evaluation proxy live on the **close-to-close return-variance scale**.
+#
+# The Parkinson estimator is built from the intraday high/low range, so it sees no part
+# of the overnight move. For SPY the overnight session carries a large share of total
+# daily variance, and raw Parkinson therefore understates close-to-close variance by
+# roughly a third. Two consequences, and they pull in opposite directions, which is why
+# one convention is applied rather than two local patches:
+#
+#   * Predictive intervals are evaluated against observed close-to-close returns. A
+#     forecast on the Parkinson scale produces intervals that are far too narrow, and
+#     the resulting breaches would be a units error masquerading as a calibration
+#     failure -- in a project whose headline result is calibration.
+#   * QLIKE's proxy-robustness (Patton 2011) is a statement about an unbiased proxy. A
+#     systematically low proxy forfeits the property that makes QLIKE safe to rank with.
+#
+# The fix is one multiplicative constant, estimated on the warm-up sample only and
+# frozen: ``c = mean(r^2) / mean(sigma^2_P)``.
+#
+# What this does and does not buy
+# -------------------------------
+# It removes the systematic level error, which is first-order. It does **not** make the
+# proxy conditionally unbiased: the overnight share of variance moves around, and within
+# the warm-up alone the quarterly ratio ranges from about 1.18 to 1.94. Residual
+# conditional bias remains and plausibly co-moves with regime, since gaps dominate in
+# stress. The report says "approximately unbiased on average", not "proxy-robustness
+# restored", and Stage 6 re-runs the QLIKE ranking on raw Parkinson to show the ranking
+# does not hinge on c.
+
+
+def compute_proxy_scale(
+    frame: pd.DataFrame,
+    *,
+    train_start: str = TRAIN_START,
+    train_end: str = TRAIN_END,
+) -> float:
+    """Estimate ``c`` on the warm-up sample only.
+
+    ``c = mean(r^2) / mean(sigma^2_P)`` over ``[train_start, train_end]``.
+
+    The squared return is **not** demeaned, matching the locked definition and the
+    standard `r^2` proxy of the volatility literature. Demeaning moves ``c`` by 0.16%
+    on this sample, which is immaterial, but the choice is stated so that it is a
+    convention rather than an accident.
+
+    The window is clipped internally from the module-level constants. A caller cannot
+    widen it to include out-of-sample data without passing different dates explicitly,
+    and ``tests/test_data.py`` asserts that out-of-sample observations cannot move the
+    returned value.
+    """
+    if pd.Timestamp(train_end) >= pd.Timestamp(OOS_START):
+        raise ValueError(
+            "the proxy scale must be estimated on warm-up data only; "
+            f"train_end={train_end} reaches into the out-of-sample block"
+        )
+    window = frame.loc[pd.Timestamp(train_start) : pd.Timestamp(train_end)]
+    usable = window[["log_return", "parkinson_var"]].dropna()
+    if usable.empty:
+        raise ValueError("no usable warm-up observations for the proxy scale")
+
+    mean_r2 = float((usable["log_return"] ** 2).mean())
+    mean_parkinson = float(usable["parkinson_var"].mean())
+    if not np.isfinite(mean_parkinson) or mean_parkinson <= 0.0:
+        raise ValueError(f"degenerate mean Parkinson variance: {mean_parkinson!r}")
+    return mean_r2 / mean_parkinson
+
+
+#: The frozen value of ``c``, computed by ``compute_proxy_scale`` on the committed
+#: snapshot over 2014-01-02..2016-12-30 (756 observations).
+#:
+#: Hard-coded deliberately. A constant recomputed at import time would silently change
+#: if the analysis frame were ever rebuilt differently, and every published number in
+#: the report would move with it without anything failing. The test suite recomputes it
+#: from the frame and asserts agreement, so drift is caught rather than absorbed.
+PROXY_SCALE_C = 1.517318
+
+#: Tolerance for the agreement test between ``PROXY_SCALE_C`` and a fresh computation.
+PROXY_SCALE_TOL = 1e-6
+
+
+def scale_proxy(parkinson_var: pd.Series, *, c: float = PROXY_SCALE_C) -> pd.Series:
+    """Put the Parkinson proxy on the close-to-close return-variance scale.
+
+    A pointwise multiplication by a frozen constant: it introduces no look-ahead of its
+    own, because ``c`` is fixed before the out-of-sample period begins and never
+    re-estimated.
+    """
+    if not np.isfinite(c) or c <= 0.0:
+        raise ValueError(f"proxy scale must be finite and positive, got {c!r}")
+    return parkinson_var * c

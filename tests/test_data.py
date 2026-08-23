@@ -482,3 +482,91 @@ def test_real_frame_covers_the_locked_windows() -> None:
     # The first in-sample row must be usable: decision D8's whole purpose.
     assert frame["log_return"].notna().all()
     assert frame["regime"].notna().all()
+
+
+# --- The proxy scale constant c ----------------------------------------------------
+
+@pytest.fixture(scope="module")
+def analysis_frame() -> pd.DataFrame:
+    """The committed analysis frame. ``c`` is a property of the real data, not a mock."""
+    path = Path("data/processed/analysis_frame.csv")
+    if not path.exists():  # pragma: no cover - depends on local state
+        pytest.skip(f"{path} not present; run `python run_all.py --stage data`")
+    return pd.read_csv(path, index_col=0, parse_dates=True)
+
+
+#
+# The master convention puts every variance in the project on the close-to-close
+# return-variance scale. ``c`` is the constant that gets the Parkinson proxy there. It
+# is estimated on the warm-up sample and frozen, so the tests that matter are the ones
+# proving it cannot move in response to out-of-sample data.
+
+
+def test_proxy_scale_cannot_see_out_of_sample_data(analysis_frame: pd.DataFrame) -> None:
+    """The look-ahead test for ``c``.
+
+    ``c`` multiplies every RW forecast and the evaluation proxy on every out-of-sample
+    day. If it could be moved by out-of-sample observations, the entire point-loss table
+    and the RW baseline's intervals would depend on the period they are evaluated over,
+    and nothing would fail to announce it.
+    """
+    baseline = D.compute_proxy_scale(analysis_frame)
+
+    corrupted = analysis_frame.copy()
+    oos_mask = corrupted.index >= pd.Timestamp(D.OOS_START)
+    assert oos_mask.sum() > 0
+    corrupted.loc[oos_mask, "log_return"] = 0.5
+    corrupted.loc[oos_mask, "parkinson_var"] = 0.25
+
+    assert D.compute_proxy_scale(corrupted) == baseline
+
+
+def test_proxy_scale_does_move_with_warm_up_data(analysis_frame: pd.DataFrame) -> None:
+    """Proves the previous test is not vacuous."""
+    baseline = D.compute_proxy_scale(analysis_frame)
+    corrupted = analysis_frame.copy()
+    warm_mask = corrupted.index <= pd.Timestamp(D.TRAIN_END)
+    corrupted.loc[warm_mask, "log_return"] = corrupted.loc[warm_mask, "log_return"] * 2.0
+    assert D.compute_proxy_scale(corrupted) != baseline
+
+
+def test_frozen_proxy_scale_matches_a_fresh_computation(
+    analysis_frame: pd.DataFrame,
+) -> None:
+    """The hard-coded constant must agree with the committed snapshot.
+
+    ``PROXY_SCALE_C`` is hard-coded so that published numbers cannot drift silently if
+    the frame is ever rebuilt differently. That protection only works if something
+    checks the two against each other, which is this test.
+    """
+    computed = D.compute_proxy_scale(analysis_frame)
+    assert abs(computed - D.PROXY_SCALE_C) < D.PROXY_SCALE_TOL
+
+
+def test_proxy_scale_is_greater_than_one(analysis_frame: pd.DataFrame) -> None:
+    """Parkinson misses overnight moves, so it must understate close-to-close variance.
+
+    A value at or below 1 would mean the intraday range explained the whole daily move,
+    which for SPY would indicate the proxy or the returns were misaligned.
+    """
+    assert 1.0 < D.compute_proxy_scale(analysis_frame) < 3.0
+
+
+def test_proxy_scale_refuses_a_window_reaching_into_the_evaluation_period(
+    analysis_frame: pd.DataFrame,
+) -> None:
+    """Widening the window must raise rather than quietly returning a leaked constant."""
+    with pytest.raises(ValueError, match="warm-up data only"):
+        D.compute_proxy_scale(analysis_frame, train_end="2020-12-31")
+
+
+def test_scale_proxy_is_a_pure_multiplication(analysis_frame: pd.DataFrame) -> None:
+    raw = analysis_frame["parkinson_var"]
+    scaled = D.scale_proxy(raw, c=2.0)
+    np.testing.assert_allclose(scaled.to_numpy(), raw.to_numpy() * 2.0)
+
+
+def test_scale_proxy_rejects_a_degenerate_constant(analysis_frame: pd.DataFrame) -> None:
+    for bad in (0.0, -1.0, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="finite and positive"):
+            D.scale_proxy(analysis_frame["parkinson_var"], c=bad)

@@ -4,6 +4,11 @@ Two sections: a **decision register** (what was decided, why, and what is still 
 and a **changelog** (what changed in each stage). Append-only. Nothing here should be
 edited to match a later result.
 
+This file is the *chronological* record. `docs/problems-and-solutions.md` is the
+*problem-oriented* view of the same material: every difficulty encountered, why it
+mattered, and the fix. The two are kept in sync; where they disagree, this file is
+authoritative because it is append-only and dated.
+
 ---
 
 ## 1. Decision register
@@ -171,8 +176,11 @@ asserted by a separate test, so the lag is still covered from both sides.
 ### 1.5 Plan switch (2026-08-23)
 
 **The governing plan is now `docs/project1-implementation-plan.md`.**
-`docs/implementation_plan.md` has been moved to `docs/archive/` and carries a superseded
-banner. It is a record, not an instruction.
+`docs/implementation_plan.md` was retired at the switch and subsequently deleted from
+the working tree. It survives only in git history (`git log -- docs/implementation_plan.md`,
+last present at commit d2689b9). Nothing in this repository should be implemented from
+it; the notes below record what it said so that the history of the decision is legible
+without recovering the file.
 
 The switch changes no locked decision. §1.1 of this register and §1 of the governing
 plan agree line for line — asset, sample window, warm-up, refit cadence, interval levels,
@@ -308,6 +316,74 @@ Full-sample values are computed and printed too, labelled "DESCRIPTIVE CONTEXT O
 They exist so a reader can confirm the two agree. They justify nothing, and nothing in
 1.1 may be revised in response to either set. Enforced by
 `test_training_window_results_ignore_out_of_sample_data`.
+
+---
+
+### 1.8 Decided at Stage 1 (2026-08-23)
+
+**D10 -- Master scale convention: everything on the close-to-close return-variance
+scale.** Directed by the researcher, and it supersedes the archived plan's withdrawn D2.
+
+Every variance forecast in the project and the evaluation proxy live on one scale. The
+Parkinson proxy is multiplied by a constant c = mean(r^2) / mean(sigma^2_P) estimated on
+the warm-up sample (2014-01-02..2016-12-30, 756 observations) and frozen thereafter.
+
+    c = 1.517318
+
+The RW baseline forecasts yesterday's **scaled** Parkinson and derives its intervals from
+that variance. EWMA and both GARCH models are already driven by squared returns and are
+unchanged.
+
+*Why it was needed.* Parkinson is built from the intraday high/low range and sees no part
+of the overnight move, which for SPY is a large share of daily variance. Raw Parkinson
+understates close-to-close variance by roughly a third, and the error pulls in two
+directions at once:
+
+| | RW (Parkinson-based) | EWMA / GARCH (r^2-based) |
+|---|---|---|
+| QLIKE against the raw proxy | units match -- unfairly advantaged | penalised by the 1.52 factor |
+| Intervals against observed returns | ~23% too narrow -- over-breaches | correctly scaled |
+
+Left alone, the RW baseline would have won the point-forecast table and failed the
+calibration table, both for a units reason with nothing to do with forecasting or
+uncertainty quantification -- contaminating precisely the comparison this project exists
+to make. Separately, QLIKE's proxy-robustness (Patton 2011) is a statement about an
+unbiased proxy; a systematically low proxy forfeits it.
+
+*What the constant does not buy, recorded before any result depends on it.* Scaling
+removes the systematic level error, which is first-order. It does **not** make the proxy
+conditionally unbiased. The overnight share of variance moves around: within the warm-up
+alone the ratio is 1.39 in 2014, 1.57 in 2015, 1.56 in 2016, and across quarters it
+ranges from 1.18 to 1.94. Residual conditional bias remains and plausibly co-moves with
+regime, since gaps dominate in stress.
+
+Consequences, all of which are obligations on later stages:
+
+- The report says the proxy is **approximately unbiased on average**. It must not claim
+  proxy-robustness is restored.
+- Stage 6 re-runs the QLIKE ranking on **raw** Parkinson, to show the ranking does not
+  hinge on c.
+- c is hard-coded as data.PROXY_SCALE_C rather than recomputed at import. A constant
+  recomputed on the fly would move silently if the frame were ever rebuilt differently,
+  and every published number would move with it without anything failing. A test
+  recomputes it from the committed snapshot and asserts agreement.
+- test_proxy_scale_cannot_see_out_of_sample_data asserts out-of-sample observations
+  cannot move c.
+
+**D11 -- Baselines use a zero predictive mean.** RiskMetrics convention, which the
+governing plan names for EWMA. The GARCH models estimate mu instead. The asymmetry is
+intentional: a baseline that quietly acquired a fitted mean would stop being a baseline.
+The daily mean return is ~0.0005 against a standard deviation of ~0.011, so the effect on
+coverage is small -- but it is a choice, not a default.
+
+**D12 -- Both baselines get Gaussian predictive distributions.** The governing plan
+specifies normal intervals for EWMA as the "naive UQ" baseline and is silent on the RW.
+Both are given the same treatment so the two baselines differ only in how they estimate
+variance, never in how they turn a variance into an interval.
+
+**D13 -- Forecast output is long, not wide.** The governing plan asks for a tidy frame;
+the archived plan's stub docstring specified a wide schema. Long wins: every downstream
+consumer groups by model or by regime.
 
 ---
 
@@ -475,9 +551,10 @@ hash verification were checked here by deliberately breaking the thing they guar
 ### Stage 1b — Plan switch (2026-08-23)
 
 `docs/project1-implementation-plan.md` replaces `docs/implementation_plan.md` as the
-governing plan. The old file moved to `docs/archive/implementation_plan.md` with a
-superseded banner. Rationale, the full stage re-keying, and the withdrawal of D1/D2/D3/
-D6/D7 are recorded in §1.5 above.
+governing plan. The old file was retired, and was then deleted from the working tree
+rather than kept as an archived copy; it remains recoverable from git history. Rationale,
+the full stage re-keying, and the withdrawal of D1/D2/D3/D6/D7 are recorded in §1.5
+above.
 
 No code changed. `src/data.py` is untouched and its tests still pass — the locked
 decisions are identical across both documents, so there was nothing in the data layer for
@@ -561,3 +638,61 @@ rather than vacuous.
 Still true: no model, no forecast, no result. Stage 1 (backtest harness plus the
 RW-in-vol and EWMA baselines) is next, and the governing plan is explicit that the
 harness is built before any interesting model, because look-ahead bugs live there.
+
+
+---
+
+### Stage 1 -- backtest harness and baselines (2026-08-23)
+
+The walk-forward loop and the two baselines. **The look-ahead audit passes**, which is
+the precondition the governing plan sets before any further stage may proceed.
+
+New: src/backtest.py implemented (was stubs), NormalPredictive / Forecast /
+PredictiveDistribution and both baselines in src/models.py, data.compute_proxy_scale /
+data.scale_proxy / data.PROXY_SCALE_C, figures.plot_forecasts_vs_realised,
+run_all.py --stage backtest, tests/test_backtest.py (22 tests), tests/test_models.py
+(17 tests), and 8 proxy-scale tests in tests/test_data.py. **Tests: 127 pass.**
+
+**Output.** 2,134 rows per model over 2017-01-03..2025-06-30, 102 refits at the 21-day
+cadence, no gaps in any forecast or PIT column. Mean annualised volatility 17.71% (RW)
+and 18.86% (EWMA) against a full-sample realised 17.61%.
+
+**Stub debt cleared.** The stubs predated the plan switch and B1-R. BacktestConfig
+carried emcee fields (n_walkers, n_steps, n_burn, thin); these are now NUTS fields
+(draws, tune, chains, target_accept), inert until Stage 3. RefitRecord likewise moved
+from acceptance-fraction/autocorrelation to R-hat, ESS and divergence counts. The "open
+item D1 blocks this module" note is gone: the governing plan fixes an expanding window in
+its locked-decisions table, so EstimationWindow.ROLLING now raises rather than silently
+producing a result nobody chose.
+
+**The refit cadence is a no-op at this stage** and that is deliberate. Neither baseline
+estimates anything -- EWMA's decay is fixed at 0.94 and the random walk has no parameters
+-- so the scaffolding is exercised for the first time by GARCH at Stage 2. Building it
+against models with no moving parts means any failure it shows is its own.
+
+**The look-ahead audit.** The master test corrupts every observation from date t onward,
+re-runs, and asserts the forecasts are bit-identical before t. Run at three dates chosen
+as the worst available cases: Volmageddon (2018-02-05), the largest COVID drawdown day
+(2020-03-16), and a 2022 selloff (2022-06-13).
+
+One point of precision, because getting it wrong is how a look-ahead test quietly stops
+testing anything. Corrupting from t leaves the *forecast* columns unchanged for dates up
+to **and including** t, since the forecast for t is built from data through t-1. It does
+**not** leave the *evaluation* columns at t unchanged: log_return and the pit derived
+from it are functions of day t itself. The test asserts the first over <= t and the
+second over < t. This is the same distinction recorded at 1.4 for the Stage 0 frame test.
+
+test_corruption_actually_changes_the_future accompanies it, because all of the above
+would also hold for a backtest that ignored its input entirely.
+
+**The acceptance plot** (figures/05_baseline_forecasts_covid.png, Nov 2019 - Jun 2020) is
+the check that no summary statistic would have caught. An EWMA forecast is a weighted
+average of *past* squared returns, so it must lag a spike on the way in and overshoot on
+the way out. Observed: realised volatility peaks at ~1.03 annualised on 16 March 2020
+while EWMA is at ~0.70 that day, reaching its own peak of 0.81 about a week later; on the
+way out realised falls to ~0.2 by early May while EWMA is still at 0.6 in late April and
+~0.30 in June against realised ~0.15. Both series are flat at ~0.10 through mid-February
+and move only after the large returns arrive. Had the recursion been reading the current
+day's return, the EWMA line would sit on top of the realised peak instead of trailing it.
+
+Next: Stage 2, frequentist GARCH(1,1)-t, which joins this loop without the loop changing.
