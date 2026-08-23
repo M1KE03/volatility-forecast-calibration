@@ -1,8 +1,13 @@
 # Trusting the Error Bars: Calibration of Frequentist vs Bayesian Volatility Forecasts
 
-**Status: Stage 2 complete. The data layer is built and verified; no model, forecast or
-result exists yet. `models.py`, `backtest.py`, `evaluation.py` and `bootstrap.py` are
-still unimplemented stubs.**
+**Status: Stage 0 complete. The data layer is built and verified and the EDA
+establishes, by test, that the data warrants a conditional-variance model. No model,
+forecast or result exists yet: `models.py`, `backtest.py`, `evaluation.py` and
+`bootstrap.py` are still unimplemented stubs. Stage 1 (backtest harness + baselines) is
+next.**
+
+Stage numbers follow [`docs/project1-implementation-plan.md`](docs/project1-implementation-plan.md),
+the governing plan.
 
 ## Research question
 
@@ -53,10 +58,11 @@ Models 3 and 4 share one log-likelihood implementation (`src/models.py`), so tha
 Explicitly **out of scope** in the core version: LSTM, Transformer, stochastic
 volatility, macro variables, multiple assets, dashboards.
 
-The full decision register, including decisions made during scaffolding and the
-items still open, is in [`research_log.md`](research_log.md). A function-by-function
-specification of the remaining work is in
-[`docs/implementation_plan.md`](docs/implementation_plan.md).
+The plan of work is [`docs/project1-implementation-plan.md`](docs/project1-implementation-plan.md):
+eight stages, a ~15-20h budget, and an ordered cut list. The full decision register,
+including decisions made during scaffolding and the items still open, is in
+[`research_log.md`](research_log.md); §1.5 there records the 2026-08-23 switch to this
+plan and the retirement of the earlier one, now in `docs/archive/`.
 
 ## Quantities that must not be conflated
 
@@ -82,8 +88,9 @@ GARCH models forecast the variance of the *close-to-close* return, which also co
 the overnight gap. Parkinson is therefore biased low relative to the forecast target,
 and QLIKE's proxy-robustness property assumes a conditionally unbiased proxy. This
 affects the **point-forecast loss only**; the interval-calibration and VaR results are
-evaluated against observed returns and are unaffected. Handling is recorded as open
-item D2 in `research_log.md`.
+evaluated against observed returns and are unaffected. The governing plan handles this
+by reporting the squared-return proxy as a robustness check at Stage 6, and the caveat
+belongs in the results section of the report, not only the methods section.
 
 ## Installation
 
@@ -93,13 +100,31 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-Requires Python 3.12. No system C/C++ compiler is needed.
+Requires Python 3.12 **and a C/C++ compiler on `PATH`** — PyMC's PyTensor backend needs
+one. `pip install -r requirements.txt` does not supply it, so it is the one part of the
+environment that is not reproducible from that file alone.
+
+This machine uses **MinGW-w64 GCC 16.2.0** (UCRT, x86_64) from the
+[WinLibs](https://winlibs.com/) release `16.2.0posix-14.0.0-ucrt-r1`, unpacked to
+`C:\Users\micha\toolchains\mingw64` and added to the user `PATH`. It is portable: no
+administrator rights are needed, and uninstalling means deleting that directory. Verify
+with:
+
+```bash
+g++ --version                 # expect 16.2.0
+python -c "import pytensor; print(pytensor.config.cxx)"
+```
+
+MSVC Build Tools works equally well if you already have it. Provenance, the verified
+SHA-256, and why this replaced the earlier compiler-free design are in `research_log.md`
+§1.6 (decision B1-R).
 
 ## Usage
 
 ```bash
 python run_all.py --help            # list pipeline stages
 python run_all.py --stage data      # build the analysis frame (implemented)
+python run_all.py --stage eda       # ARCH-LM, Ljung-Box, ADF + Stage 0 figures (implemented)
 python run_all.py --all             # run the full pipeline
 ```
 
@@ -108,6 +133,33 @@ pass `--refresh` to re-download, which deliberately replaces that snapshot. It p
 full data quality report and writes `data/processed/analysis_frame.csv`.
 
 The `backtest`, `evaluate` and `figures` stages still raise `NotImplementedError`.
+
+### What the EDA establishes
+
+Diagnostics are computed on the **training window only** (2014-01-02 to 2016-12-30).
+Justifying the model class with a statistic computed over the out-of-sample period would
+let the evaluation window argue for the model later evaluated on it -- a mild look-ahead,
+but the exact species this project exists to detect. Full-sample values are printed as
+labelled descriptive context and justify nothing.
+
+| Diagnostic | Training-window result |
+|---|---|
+| ARCH-LM (Engle), lags 5 / 10 / 22 | p = 1.5e-23 / 1.8e-21 / 1.0e-17 — rejects at every lag |
+| Ljung-Box, **squared** returns | p = 3.4e-44 / 1.1e-51 / 1.8e-47 — rejects |
+| Ljung-Box, **raw** returns | p = 0.45 / 0.62 / 0.26 — no rejection |
+| ADF on returns | -27.39, p < 1e-300 — stationary |
+| Excess kurtosis | 2.46 |
+
+The contrast between the two Ljung-Box rows is the point, not the first row alone:
+abundant structure in the second moment, none detectable in the first. That is the regime
+in which a conditional-variance model earns its place. The excess kurtosis is the
+independent empirical warrant for the Student-t innovation.
+
+A known limitation, recorded up front: over the **full** sample the raw-return Ljung-Box
+does reject (p = 7.1e-14), as short-horizon autocorrelation rises in crises. The constant
+mean is applied identically to all four forecasters so it cannot bias the comparison, but
+it is a real simplification over the evaluation period and is carried into the report's
+limitations section.
 
 ### The analysis frame
 
@@ -130,7 +182,8 @@ and never reaches the analysis frame (decision D8 in `research_log.md`).
 ├── run_all.py             # single entry point
 ├── research_log.md        # decision register + changelog
 ├── docs/
-│   └── implementation_plan.md   # function-by-function spec of remaining work
+│   ├── project1-implementation-plan.md   # governing plan: stages, budget, cut list
+│   └── archive/                          # superseded plans, kept as a record
 ├── data/
 │   ├── raw/               # committed price snapshots + SHA-256 manifest
 │   └── processed/         # derived, gitignored, regenerable

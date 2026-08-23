@@ -6,7 +6,7 @@ Usage
     python run_all.py --stage data
     python run_all.py --all
 
-``data`` is implemented (Stage 2). ``backtest``, ``evaluate`` and ``figures`` are still
+``data`` is implemented (Stage 0). ``backtest``, ``evaluate`` and ``figures`` are still
 stubs and raise ``NotImplementedError``: their interfaces exist so they can be reviewed
 before any implementation is written.
 
@@ -25,11 +25,14 @@ RAW_DIR = PROJECT_ROOT / "data" / "raw"
 PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 FIGURES_DIR = PROJECT_ROOT / "figures"
 
-STAGE_ORDER: tuple[str, ...] = ("data", "backtest", "evaluate", "figures")
+STAGE_ORDER: tuple[str, ...] = ("data", "eda", "backtest", "evaluate", "figures")
 
 STAGE_HELP: dict[str, str] = {
     "data": "Download or load cached SPY and ^VIX bars, verify hashes, build the "
             "analysis frame (returns, Parkinson proxy, lagged-VIX regimes).",
+    "eda": "Test for the ARCH effects that motivate a conditional-variance model "
+           "(Engle LM, Ljung-Box, ADF) on the training window, and render the "
+           "Stage 0 figures.",
     "backtest": "Walk forward through the out-of-sample period, refitting every 21 "
                 "trading days, producing daily forecasts and predictive intervals "
                 "for all four models.",
@@ -98,6 +101,62 @@ def stage_data(args: argparse.Namespace) -> None:
     print(f"wrote {out}")
 
 
+def stage_eda(args: argparse.Namespace) -> None:
+    """Establish, by test, that the data warrants a conditional-variance model.
+
+    Primary results are computed on the **training window only**. Full-sample values are
+    printed afterwards as descriptive context and are explicitly not a justification for
+    anything -- see the module docstring of ``src.eda``.
+    """
+    import pandas as pd
+
+    from src import eda, figures
+    from src.data import TRAIN_END, TRAIN_START
+
+    frame_path = PROCESSED_DIR / "analysis_frame.csv"
+    if not frame_path.exists():
+        raise SystemExit(
+            f"{frame_path} not found. Run `python run_all.py --stage data` first."
+        )
+    frame = pd.read_csv(frame_path, index_col=0, parse_dates=True)
+
+    train_returns = frame.loc[TRAIN_START:TRAIN_END, "log_return"]
+    train_report = eda.run_eda(train_returns, window_label="training window (PRIMARY)")
+    print(train_report.format_full())
+    print()
+    print("VERDICT:", train_report.headline_verdict())
+
+    full_report = eda.run_eda(
+        frame["log_return"], window_label="full sample (DESCRIPTIVE CONTEXT ONLY)"
+    )
+    print()
+    print(full_report.format_full())
+    print()
+    print(
+        "The full-sample block above is reported so a reader can see it agrees with"
+        " the training window. It justifies nothing: every design decision was locked"
+        " before these numbers existed (research_log.md 1.1)."
+    )
+
+    written = [
+        figures.plot_returns_with_regimes(
+            frame, FIGURES_DIR / "01_returns_clustering.png", train_end=TRAIN_END
+        ),
+        figures.plot_squared_return_acf(
+            train_report.acf_squared,
+            FIGURES_DIR / "02_squared_return_acf.png",
+            window_label="training window",
+        ),
+        figures.plot_return_distribution(
+            train_returns, FIGURES_DIR / "03_return_distribution.png"
+        ),
+        figures.plot_vix_with_regimes(frame, FIGURES_DIR / "04_vix_regimes.png"),
+    ]
+    print()
+    for path in written:
+        print(f"wrote {path}")
+
+
 def stage_backtest(args: argparse.Namespace) -> None:
     """Run the walk-forward backtest and persist forecasts and refit diagnostics."""
     raise NotImplementedError("stage 'backtest' not implemented")
@@ -115,6 +174,7 @@ def stage_figures(args: argparse.Namespace) -> None:
 
 STAGES = {
     "data": stage_data,
+    "eda": stage_eda,
     "backtest": stage_backtest,
     "evaluate": stage_evaluate,
     "figures": stage_figures,

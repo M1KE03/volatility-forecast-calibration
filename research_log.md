@@ -168,6 +168,149 @@ asserted by a separate test, so the lag is still covered from both sides.
 
 ---
 
+### 1.5 Plan switch (2026-08-23)
+
+**The governing plan is now `docs/project1-implementation-plan.md`.**
+`docs/implementation_plan.md` has been moved to `docs/archive/` and carries a superseded
+banner. It is a record, not an instruction.
+
+The switch changes no locked decision. §1.1 of this register and §1 of the governing
+plan agree line for line — asset, sample window, warm-up, refit cadence, interval levels,
+losses, DM, bootstrap, VIX thresholds, the four forecasters, and the exclusions. Nothing
+built so far is invalidated: `src/data.py` and its 56 tests implement the data half of
+the governing plan's Stage 0 exactly as specified.
+
+**Stage numbering is re-keyed and the old numbering is retired.** The archived plan
+numbered stages by module (its Stage 2 = `data.py`); the governing plan numbers them by
+workflow (its Stage 2 = frequentist GARCH). Every "Stage N" reference in this repository
+from this entry forward means the governing plan's N:
+
+| Stage | Governing plan | State |
+|---|---|---|
+| 0 | Scaffold, data, EDA | data done; **EDA outstanding** |
+| 1 | Backtest harness + RW-in-vol and EWMA baselines | not started |
+| 2 | Frequentist GARCH(1,1)-t | not started |
+| 3 | Bayesian GARCH(1,1)-t | not started |
+| 4 | Evaluation layer | not started |
+| 5 | Regime-conditional analysis | not started |
+| 6 | Robustness and ablations | not started |
+| 7 | Write-up and polish | not started |
+
+**D1, D2, D3, D6 and D7 are withdrawn, not resolved.** They were raised by the archived
+plan; the governing plan does not carry them. Where it is silent, its own default reading
+applies as each stage is reached, and the reading actually used is recorded here at that
+point rather than pre-negotiated. D3 (Giacomini–White) was never authorised scope and is
+dropped outright.
+
+**B1 stands.** The governing plan §3 prefers PyMC (route A) with emcee as route B. B1
+already chose the numba likelihood + emcee path, for a machine-specific reason that has
+not changed: no system C/C++ compiler is present, which is what route A needs. The
+governing plan states route B "costs you nothing scientifically" and sets an end-of-day-4
+deadline to fall back to it; that fallback is simply taken up front. `arch` remains a
+validation-only dependency.
+
+**What the switch adds to the outstanding work**, all of it absent from the archived plan:
+
+- Stage 0 EDA: ARCH-LM (the motivating test), Ljung–Box on squared returns, ACF of r²,
+  ADF on returns.
+- Stage 2: a normal-innovation GARCH variant, fitted as the Stage 6 ablation.
+- Stage 6: GARCH-normal vs GARCH-t coverage at 99%; a 63-day refit-cadence spot check;
+  the squared-return proxy sensitivity.
+- Stage 7 and the project as a whole: a ~15–20h budget, a week layout, an ordered cut
+  list, and a never-cut list (look-ahead audit, Christoffersen, bootstrap CIs on regime
+  coverage, limitations section).
+
+**What the switch drops:** the archived plan's function-by-function specifications,
+formulas, named failure modes, and ~50-test inventory. These are not carried forward as a
+document. Where a formula there was correct it will be re-derived at the stage that needs
+it; the archived file remains readable if a detail is worth recovering.
+
+---
+
+### 1.6 B1 revised — route A adopted (2026-08-23)
+
+**B1-R — Bayesian backend is now PyMC + `pytensor.scan` (governing plan route A).**
+This supersedes B1, which chose numba + emcee. B1 is left standing above as the record
+of what was believed on 2026-08-21; it is no longer what the project does.
+
+B1 rested on one factual premise: *no system C/C++ compiler is present on the target
+machine, and requiring one damages reproducibility*. The researcher directed that the
+compiler be installed. It was, so the premise no longer holds:
+
+- **MinGW-w64 GCC 16.2.0**, UCRT runtime, x86_64, POSIX threads, SEH — the UCRT build is
+  the one that matches CPython 3.12's own runtime.
+- Source: WinLibs release `16.2.0posix-14.0.0-ucrt-r1`, the `.zip` asset, SHA-256
+  `c1f52294597c0b73786b2a78eb5d176d89226d2f21875eab75e783a8b1cefcc4`, **verified against
+  the publisher's published hash before extraction**.
+- Installed to `C:\Users\micha\toolchains\mingw64`, which is on the user PATH. Portable and
+  needs no administrator rights; uninstalling is deleting the directory and removing the
+  PATH entry. MSVC Build Tools was rejected: it requires elevation, which this session
+  does not have.
+
+**A second fact undercut B1 independently of the compiler.** PyTensor 3.3.0's default
+linker is `NumbaLinker`, not the C linker — PyTensor now compiles through numba, which
+B1 had already accepted as needing no system compiler. Route A was therefore probably
+open the whole time. B1's reasoning was sound on the evidence it had; the evidence was
+incomplete. Recorded because the failure mode — rejecting an option on a premise never
+tested — is worth not repeating.
+
+**Route A was verified before adoption, not assumed.** A throwaway probe fitted
+GARCH(1,1)-t to the actual training window (756 returns, percent scale), with
+`alpha + beta < 1` enforced by construction via `beta = (1 - alpha) * delta`,
+`delta ~ Beta(10, 2)`, and `nu` truncated below at 4:
+
+| Quantity | Result |
+|---|---|
+| R-hat, all parameters | 1.00 |
+| Divergences | 0 |
+| ESS (bulk) | 485-809 |
+| Sampling time | ~10 s for 2 chains x (500 tune + 500 draw) |
+| mu, omega, alpha, beta, nu | 0.071, 0.059, 0.219, 0.713, 6.4 |
+
+`alpha + beta = 0.93` and `nu = 6.4` are the persistence and tail thickness one expects
+from daily SPY, which is a sanity check on the likelihood as much as on the sampler.
+The ~30 s wall clock included ~20 s of one-time graph compilation that is **not** paid
+per refit, so the 102-refit backtest is on the order of 20 minutes, not the 50 the naive
+extrapolation suggested. This is a probe, not project code: `models.py` must still be
+built and tested properly, and the priors above are a starting point that D4 has to
+confirm.
+
+**Consequences.**
+
+- Route B (emcee) is demoted to the fallback the governing plan always intended it to be.
+  `emcee` stays pinned; if a refit fails to sample it is the escape hatch.
+- `numba` is downgraded 0.67.0 -> 0.66.0, `llvmlite` 0.49.0 -> 0.48.0, and `numpy`
+  2.5.2 -> 2.4.6, all forced by `pytensor 3.3.0`'s ceilings. `llvmlite` is now pinned
+  explicitly so it cannot drift away from `numba`.
+- **The full suite was re-run after the downgrade: 56 pass.** The data layer is unaffected
+  by the numpy change, which was the thing worth checking rather than assuming.
+- Reproducibility now has a component that `pip install -r requirements.txt` does not
+  supply. The compiler, its version, its source and its hash are therefore recorded here
+  and in `requirements.txt`, and the README states the prerequisite.
+
+---
+
+### 1.7 Decided at Stage 0 EDA (2026-08-23)
+
+**D9 — EDA diagnostics are computed on the training window as the primary result.**
+The governing plan asks for ARCH-LM, Ljung-Box, ACF and ADF without saying over which
+window. Choosing the full sample would have been the obvious reading and is what most
+write-ups do.
+
+Training window chosen instead. Model-class choice is a modelling decision: justifying
+"we use GARCH" with a statistic computed over the 2,134 out-of-sample days would let the
+evaluation period argue for the model that is later evaluated on it. It is a mild
+look-ahead, but it is the exact species this project exists to detect in others, and the
+project would have no standing to report a coverage failure elsewhere while committing
+this one in its own motivation section.
+
+Full-sample values are computed and printed too, labelled "DESCRIPTIVE CONTEXT ONLY".
+They exist so a reader can confirm the two agree. They justify nothing, and nothing in
+1.1 may be revised in response to either set. Enforced by
+`test_training_window_results_ignore_out_of_sample_data`.
+
+---
+
 ## 2. Changelog
 
 ### Stage 0 — Inspection and risk review (2026-08-21)
@@ -325,3 +468,96 @@ clone. **Tests: 56 pass.**
 General lesson, applicable to the remaining stages: an integrity check that has never
 been observed to fail is not evidence that it works. Both the look-ahead tests and the
 hash verification were checked here by deliberately breaking the thing they guard.
+
+
+---
+
+### Stage 1b — Plan switch (2026-08-23)
+
+`docs/project1-implementation-plan.md` replaces `docs/implementation_plan.md` as the
+governing plan. The old file moved to `docs/archive/implementation_plan.md` with a
+superseded banner. Rationale, the full stage re-keying, and the withdrawal of D1/D2/D3/
+D6/D7 are recorded in §1.5 above.
+
+No code changed. `src/data.py` is untouched and its tests still pass — the locked
+decisions are identical across both documents, so there was nothing in the data layer for
+the switch to invalidate. README and the Stage-2-means-`data.py` comments in `run_all.py`,
+`src/data.py` and `tests/test_data.py` were re-keyed to the governing plan's numbering,
+under which the data layer is part of **Stage 0**.
+
+The claim "Stage 2 complete" is therefore now false under the current numbering and has
+been removed everywhere. The true state is: Stage 0 partially complete — data layer
+built and verified, EDA not started.
+
+
+---
+
+### Stage 1c — C++ toolchain installed, route A adopted (2026-08-23)
+
+At the researcher's direction, a C/C++ compiler was installed so the governing plan's
+preferred Bayesian route (PyMC) could be used. Full reasoning, provenance and the
+verification probe are in §1.6 above (decision B1-R).
+
+Changed: `requirements.txt` (compiler prerequisite documented; `pymc`, `pytensor`,
+`arviz` and an explicit `llvmlite` pin added; `numba`, `numpy` and `llvmlite` re-pinned
+downward to pytensor's ceilings; `emcee` re-labelled as the route B fallback) and
+`README.md` (prerequisite plus install instructions).
+
+No source file changed. Tests: 56 pass, before and after the dependency downgrade.
+
+Still true, and worth stating plainly because the environment work can look like
+progress: no model, no forecast and no result exists. Stage 0's EDA is next.
+
+
+---
+
+### Stage 0 EDA — `src/eda.py`, `src/figures.py` (2026-08-23)
+
+The premise of the project, established by test rather than assumed. **Stage 0 is now
+complete** under the governing plan's numbering.
+
+New: `src/eda.py` (Engle ARCH-LM, Ljung-Box, ADF, ACF of squared returns, return
+summary), `src/figures.py` (house style plus the four Stage 0 figures),
+`run_all.py --stage eda`, `notebooks/01_eda.ipynb`, `tests/test_eda.py`.
+`statsmodels==0.14.6` pinned as a direct dependency — it was present only as an `arch`
+dependency and is now imported directly. **Tests: 82 pass** (56 + 26 new).
+
+**Training-window results, which are the ones that license the design:**
+
+| Diagnostic | Result |
+|---|---|
+| ARCH-LM, lags 5 / 10 / 22 | p = 1.5e-23 / 1.8e-21 / 1.0e-17 — rejects at every lag |
+| Ljung-Box, squared returns, 5 / 10 / 22 | p = 3.4e-44 / 1.1e-51 / 1.8e-47 — rejects |
+| Ljung-Box, raw returns, 5 / 10 / 22 | p = 0.45 / 0.62 / 0.26 — **no rejection** |
+| ADF on returns | stat -27.39, p < 1e-300 — stationary |
+| Excess kurtosis | 2.46 |
+| Annualised vol | 13.36% |
+
+The contrast between rows 2 and 3 is the finding, not row 2 alone: abundant structure in
+the second moment, none detectable in the first. That is precisely the regime in which a
+conditional-variance model earns its place. Excess kurtosis of 2.46 is the independent
+empirical warrant for the Student-t innovation in 1.1.
+
+**One full-sample discrepancy, recorded because it is a genuine limitation.**
+Over the full sample, Ljung-Box on **raw** returns *rejects* (p = 7.1e-14 at 5 lags),
+where on the training window it does not. Short-horizon return autocorrelation rises in
+crises and the out-of-sample period contains several. Full-sample excess kurtosis is
+14.71 against 2.46 in training, driven by the same episodes.
+
+This does not bias the project's central comparison: the constant mean of decision D5 is
+applied identically to all four forecasters, so it cannot favour one over another. It
+does mean the constant-mean assumption is a real simplification over the evaluation
+period. **It belongs in the report's limitations section**, and is written down now so
+that it is reported as a known property rather than discovered late and quietly dropped.
+
+**Test design note.** Every diagnostic is tested twice: on data that should trigger it
+(simulated GARCH, AR(1), random walk) and on data that should not (i.i.d. normal).
+Testing only the positive case cannot distinguish a working test from a function that
+always rejects — and "always rejects" would have handed this project a fabricated
+justification for its own model class. `test_arch_lm_would_be_inflated_without_demeaning`
+exists for the same reason: it proves the demeaning invariance test is load-bearing
+rather than vacuous.
+
+Still true: no model, no forecast, no result. Stage 1 (backtest harness plus the
+RW-in-vol and EWMA baselines) is next, and the governing plan is explicit that the
+harness is built before any interesting model, because look-ahead bugs live there.

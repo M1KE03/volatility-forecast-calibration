@@ -1,4 +1,4 @@
-"""Stage 2 tests for ``src.data``.
+"""Stage 0 tests for ``src.data``.
 
 Two categories, kept visually separate because they fail for different reasons:
 

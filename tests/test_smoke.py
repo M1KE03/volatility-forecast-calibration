@@ -50,7 +50,7 @@ EXPECTED_FILES = [
     "run_all.py",
     "research_log.md",
     "report/report.md",
-    "docs/implementation_plan.md",
+    "docs/project1-implementation-plan.md",
 ]
 
 
@@ -82,7 +82,7 @@ def test_entry_point_parser_builds() -> None:
 
 
 # Stages that have not landed yet. Entries are removed as each stage is implemented;
-# `data` was removed at Stage 2. Behaviour for an implemented stage is tested in that
+# `data` was removed at Stage 0. Behaviour for an implemented stage is tested in that
 # stage's own test module, not here.
 UNIMPLEMENTED_STAGES = ["backtest", "evaluate", "figures"]
 

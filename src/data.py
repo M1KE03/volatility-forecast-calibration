@@ -113,7 +113,7 @@ class DataQualityReport:
     def format_full(self) -> str:
         """Render every finding with every affected date listed and none elided.
 
-        Truncating this to a count would defeat the point of returning it: the Stage 2
+        Truncating this to a count would defeat the point of returning it: the Stage 0
         acceptance criterion is that any dropped date is visible.
         """
 
@@ -445,7 +445,7 @@ def build_analysis_frame(
     Derived columns are computed on the full joined history and only then trimmed to
     ``[sample_start, sample_end]``, so the lag on the first in-sample row comes from
     real data rather than being left NaN (decision D8). ``sample_start`` and
-    ``sample_end`` are keyword-only additions to the Stage 1 signature.
+    ``sample_end`` are keyword-only additions to the original scaffold signature.
     """
     spy = spy_raw.sort_index()
     vix = vix_raw.sort_index()
