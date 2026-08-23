@@ -1,10 +1,10 @@
 # Trusting the Error Bars: Calibration of Frequentist vs Bayesian Volatility Forecasts
 
-**Status: Stage 1 complete. The walk-forward harness is built and its look-ahead audit
-passes; both baselines produce a complete forecast table over the 2,134-day evaluation
-window. Neither GARCH model exists yet: `evaluation.py` and `bootstrap.py` are still
-stubs and the GARCH half of `models.py` is stubbed. Stage 2 (frequentist GARCH) is
-next.**
+**Status: Stage 2 complete. Three of the four forecasters exist — both baselines and the
+frequentist GARCH(1,1)-t — plus the GARCH-normal ablation, each with a complete forecast
+table over the 2,134-day evaluation window. The look-ahead audit passes with the GARCH
+models in the loop. The Bayesian model is next: `sample_garch_posterior` and
+`posterior_predictive` are stubs, as are all of `evaluation.py` and `bootstrap.py`.**
 
 Stage numbers follow [`docs/project1-implementation-plan.md`](docs/project1-implementation-plan.md),
 the governing plan.
@@ -23,15 +23,21 @@ calibration.
 
 ## Models compared
 
-| # | Model | Role |
-|---|---|---|
-| 1 | Yesterday's volatility | Naive baseline |
-| 2 | EWMA / RiskMetrics | Industry baseline |
-| 3 | GARCH(1,1)-t, frequentist MLE | Plug-in predictive |
-| 4 | GARCH(1,1)-t, Bayesian | Posterior predictive |
+| # | Model | Key | Role | State |
+|---|---|---|---|---|
+| 1 | Yesterday's volatility | `yesterday` | Naive baseline | built |
+| 2 | EWMA / RiskMetrics | `ewma` | Industry baseline | built |
+| 3 | GARCH(1,1)-t, frequentist MLE | `garch_mle` | Plug-in predictive | built |
+| 4 | GARCH(1,1)-t, Bayesian | `garch_bayes` | Posterior predictive | Stage 3 |
 
 Models 3 and 4 share one log-likelihood implementation (`src/models.py`), so that
 "the same underlying likelihood" is a property of the code rather than a claim.
+
+A fifth track, `garch_mle_normal`, is carried through the same backtest. It is the
+**Stage 6 ablation** — normal versus Student-t innovations, the cheap and decisive lever
+on 99% tail coverage — and not a competitor: `backtest.HEADLINE_MODELS` excludes it and
+the evaluation layer filters on that tuple. It is fitted now because doing so costs five
+seconds per full run and saves re-entering the walk-forward loop later.
 
 ## Locked design decisions
 
@@ -136,9 +142,13 @@ SHA-256, and why this replaced the earlier compiler-free design are in `research
 python run_all.py --help            # list pipeline stages
 python run_all.py --stage data      # build the analysis frame (implemented)
 python run_all.py --stage eda       # ARCH-LM, Ljung-Box, ADF + Stage 0 figures (implemented)
-python run_all.py --stage backtest  # walk-forward loop + the two baselines (implemented)
+python run_all.py --stage backtest  # walk-forward loop, baselines + GARCH (implemented)
 python run_all.py --all             # run the full pipeline
 ```
+
+`--stage backtest` takes about a minute: it refits GARCH at each of the 102 refit dates
+for both innovation distributions, 204 maximum-likelihood fits in total. Every other
+implemented stage is near-instant.
 
 `--stage data` uses the committed snapshot in `data/raw/` and makes no network call;
 pass `--refresh` to re-download, which deliberately replaces that snapshot. It prints the
@@ -190,9 +200,23 @@ look-ahead test quietly stops testing anything.
 `test_corruption_actually_changes_the_future` sits beside it, because everything above
 would also hold for a backtest that ignored its input entirely.
 
+Since Stage 2 the audit covers the GARCH models, which is the first time it has had
+anything to say. Both baselines are parameter-free, so until there was a model that
+estimated something the audit could not have caught a refit trained on data it should
+not have seen. Every route by which the future could reach a forecast is now inside its
+scope: the estimation window, the backcast seed, and the daily filter.
+
 ```bash
-pytest tests/test_backtest.py -q
+pytest -q                      # everything, including the audit (~10 min)
+pytest -m "not slow" -q        # inner loop; skips the corrupted re-runs (~1 min)
 ```
+
+The `slow` marker covers the 15 tests that each need their *own* backtest run: the
+audit's three corrupted re-runs, the vacuity check beside them, and the determinism
+test. Everything else shares one module-scoped run, which is why the inner loop still
+costs a minute rather than seconds. Plain `pytest` runs the marked tests too — the audit
+is on the governing plan's never-cut list, and a default test run must not be the thing
+that skips it.
 
 ### What the EDA establishes
 
@@ -221,6 +245,45 @@ mean is applied identically to all four forecasters so it cannot bias the compar
 it is a real simplification over the evaluation period and is carried into the report's
 limitations section.
 
+### What the GARCH fit establishes
+
+Two cadences run in the backtest and conflating them is the subtle bug the harness was
+built to prevent. Parameters are re-estimated every 21 trading days on the expanding
+window; *between* refits they are held fixed while the variance recursion still advances
+daily with each newly observed return. Freezing the variance between refits as well
+would produce a complete, plausible forecast table built on variances up to 21 days
+stale — which is not a one-day-ahead GARCH forecast at all.
+
+On the warm-up window (756 observations, training only):
+
+| Quantity | Value |
+|---|---|
+| mu, omega | 0.000704, 4.81e-6 |
+| alpha, beta, alpha + beta | 0.2150, 0.7353, 0.9503 |
+| nu (Student-t d.o.f.) | 5.86 |
+| Ljung-Box, standardised **residuals**, lags 5 / 10 / 22 | p = 0.50 / 0.57 / 0.29 — no rejection |
+| Ljung-Box, **squared** standardised residuals | p = 0.62 / 0.88 / 0.98 — no rejection |
+| Refits converged | 102 / 102 for both innovation distributions |
+
+The squared-residual row is the one that matters. The same test on raw squared returns
+rejects at p = 3.4e-44; after the GARCH filter there is nothing left to reject, so the
+variance equation has absorbed the clustering it was fitted to absorb. The residual row
+says the constant mean is adequate in sample, which is consistent with the raw-return
+Ljung-Box above and does not disturb the limitation recorded there about the evaluation
+period.
+
+An independent check on the likelihood: the Stage 3 feasibility probe fitted this same
+window with PyMC under priors and obtained alpha 0.219, beta 0.713, nu 6.4. A
+hand-written NumPy likelihood maximised by L-BFGS-B and a `pytensor.scan` graph sampled
+by NUTS share no code, so their agreement is better evidence than either number alone.
+
+`figures/07_garch_parameter_stability.png` tracks the estimates across all 102 refits.
+Persistence rises through the sample and exceeds 0.999 in 16 of them, peaking at
+0.99998 — every fit admissible and converged, but very nearly at the stationarity
+boundary. That is ordinary for a long daily equity sample containing 2020 and 2022, and
+it is recorded because the Bayesian model at Stage 3 enforces the same constraint by
+construction and will press against the same edge.
+
 ### The analysis frame
 
 2,890 trading days, 2014-01-02 to 2025-06-30: 756 training rows (2014-01-02 to
@@ -239,6 +302,7 @@ and never reaches the analysis frame (decision D8 in `research_log.md`).
 .
 ├── README.md
 ├── requirements.txt
+├── pytest.ini             # registers the `slow` marker
 ├── run_all.py             # single entry point
 ├── research_log.md        # decision register + changelog
 ├── docs/
@@ -250,10 +314,12 @@ and never reaches the analysis frame (decision D8 in `research_log.md`).
 │   └── processed/         # derived, gitignored, regenerable
 ├── src/
 │   ├── data.py            # download, caching, returns, proxy, regimes
+│   ├── eda.py             # ARCH-LM, Ljung-Box, ADF, ACF
 │   ├── models.py          # shared likelihood, MLE, MCMC, baselines
-│   ├── backtest.py        # walk-forward loop, refit schedule
-│   ├── evaluation.py      # losses, coverage tests, DM
-│   └── bootstrap.py       # stationary block bootstrap
+│   ├── backtest.py        # walk-forward loop, refit schedule, daily filter
+│   ├── figures.py         # house style, all figures
+│   ├── evaluation.py      # losses, coverage tests, DM        (stubs)
+│   └── bootstrap.py       # stationary block bootstrap        (stubs)
 ├── notebooks/             # thin presentation layer only
 ├── tests/
 ├── figures/

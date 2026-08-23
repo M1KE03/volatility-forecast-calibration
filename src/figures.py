@@ -276,6 +276,7 @@ MODEL_LABELS = {
     "yesterday": "RW-in-vol (yesterday's scaled Parkinson)",
     "ewma": "EWMA (RiskMetrics, lambda = 0.94)",
     "garch_mle": "GARCH(1,1)-t, plug-in",
+    "garch_mle_normal": "GARCH(1,1)-normal, plug-in (ablation)",
     "garch_bayes": "GARCH(1,1)-t, posterior predictive",
 }
 
@@ -283,6 +284,7 @@ MODEL_COLOURS = {
     "yesterday": "#8a8f98",
     "ewma": "#b5482e",
     "garch_mle": "#31456b",
+    "garch_mle_normal": "#7a90bd",
     "garch_bayes": "#2e7d6b",
 }
 
@@ -366,5 +368,140 @@ def plot_forecasts_vs_realised(
     for tick in ax_r.get_xticklabels():
         tick.set_fontsize(7)
 
+    fig.tight_layout()
+    return _finish(fig, out_path)
+
+
+# --- Stage 2 figures ---------------------------------------------------------------
+
+
+def plot_garch_residual_diagnostics(
+    residuals: np.ndarray,
+    nu: float,
+    out_path: Path,
+    *,
+    acf_levels: pd.DataFrame,
+    acf_squares: pd.DataFrame,
+) -> Path:
+    """Standardised residuals from the warm-up GARCH fit: QQ plot and two ACFs.
+
+    Under correct specification these residuals are i.i.d. draws from the standardised
+    Student-t: the QQ plot sits on the diagonal, and neither the levels nor the squares
+    show autocorrelation. The two ACFs test different claims and both are needed --
+    structure left in the levels would indict the constant-mean assumption, structure
+    left in the squares would mean the variance equation has not absorbed the
+    clustering that motivated fitting a GARCH at all.
+
+    The QQ reference is the **fitted** t, not a normal. Comparing against a normal here
+    would only restate Stage 0's finding that returns are fat-tailed; the question at
+    this stage is whether the t that was actually fitted is the right t.
+    """
+    from scipy import stats
+
+    apply_house_style()
+    fig, (ax_qq, ax_lev, ax_sq) = plt.subplots(1, 3, figsize=(10.5, 3.3))
+
+    clean = np.asarray(residuals, dtype=float)
+    clean = clean[np.isfinite(clean)]
+    n = clean.size
+    # Standardised t: unit variance, so the reference quantiles carry the same
+    # sqrt((nu-2)/nu) factor the predictive distribution does.
+    probs = (np.arange(1, n + 1) - 0.5) / n
+    theoretical = stats.t.ppf(probs, nu) * np.sqrt((nu - 2.0) / nu)
+    ax_qq.scatter(theoretical, np.sort(clean), s=5, color=COLOURS["returns"], alpha=0.6)
+    span = [float(theoretical.min()), float(theoretical.max())]
+    ax_qq.plot(span, span, color=COLOURS["accent"], linewidth=1.0)
+    ax_qq.set_title(f"QQ vs fitted t (nu = {nu:.2f})")
+    ax_qq.set_xlabel("theoretical quantile")
+    ax_qq.set_ylabel("standardised residual")
+
+    for ax, acf_frame, title in (
+        (ax_lev, acf_levels, "ACF of standardised residuals"),
+        (ax_sq, acf_squares, "ACF of squared standardised residuals"),
+    ):
+        lags = acf_frame.index.to_numpy()
+        values = acf_frame["acf"].to_numpy()
+        ax.vlines(lags, 0.0, values, color=COLOURS["returns"], linewidth=1.4)
+        ax.scatter(lags, values, s=7, color=COLOURS["returns"], zorder=3)
+        ax.fill_between(
+            lags,
+            acf_frame["ci_lower"].to_numpy(),
+            acf_frame["ci_upper"].to_numpy(),
+            color=COLOURS["muted"],
+            alpha=0.20,
+            linewidth=0,
+        )
+        ax.axhline(0.0, color="black", linewidth=0.8)
+        ax.set_title(title)
+        ax.set_xlabel("lag (trading days)")
+        ax.margins(x=0.01)
+
+    fig.tight_layout()
+    return _finish(fig, out_path)
+
+
+def plot_parameter_stability(records: pd.DataFrame, out_path: Path) -> Path:
+    """GARCH estimates across the 102 refits.
+
+    Nearly free once the refits exist, and it answers a question the coverage tables
+    cannot: whether the model the backtest is scoring is one model or a slowly drifting
+    sequence of them. Persistence ``alpha + beta`` is drawn on its own panel with the
+    stationarity boundary marked, because it is the quantity that would announce a
+    fitting problem by walking into 1.
+
+    Reads the persisted ``RefitRecord`` table, so the plotted estimates are the same
+    numbers the audit trail holds rather than a second, separately computed set.
+    """
+    apply_house_style()
+    # Rows with an estimated alpha, i.e. the models that actually fit something. Keyed
+    # on the data rather than on a list of model names, so a model added later appears
+    # here without this function needing to be told about it.
+    fitted = records[records["alpha"].notna()].copy()
+    fitted["refit_date"] = pd.to_datetime(fitted["refit_date"])
+
+    panels = (
+        ("alpha", "alpha"),
+        ("beta", "beta"),
+        ("persistence", "alpha + beta"),
+        ("nu", "nu (Student-t d.o.f.)"),
+    )
+    fig, axes = plt.subplots(4, 1, figsize=(7.4, 8.0), sharex=True)
+
+    for ax, (column, label) in zip(axes, panels):
+        for model, group in fitted.groupby("model", sort=False):
+            if column == "persistence":
+                values = group["alpha"].to_numpy() + group["beta"].to_numpy()
+            else:
+                values = group[column].to_numpy()
+            if not np.any(np.isfinite(values)):
+                continue  # nu is undefined for the normal-innovation variant
+            ax.plot(
+                group["refit_date"].to_numpy(),
+                values,
+                linewidth=1.2,
+                marker="o",
+                markersize=2.5,
+                color=MODEL_COLOURS.get(model, COLOURS["muted"]),
+                label=MODEL_LABELS.get(model, model),
+            )
+        if column == "persistence":
+            ax.axhline(1.0, color=COLOURS["accent"], linewidth=0.9, linestyle="--")
+            ax.annotate(
+                "stationarity boundary",
+                xy=(0.01, 1.0),
+                xycoords=("axes fraction", "data"),
+                xytext=(0, 3),
+                textcoords="offset points",
+                fontsize=7,
+                color=COLOURS["accent"],
+            )
+        ax.set_ylabel(label)
+        # Stress labels go on the bottom panel, not the top one: the top panel carries
+        # the legend, and top-anchored annotations there print straight through it.
+        shade_stress_periods(ax, label=(column == "nu"))
+
+    axes[0].set_title("GARCH(1,1) estimates across the 102 refits (expanding window)")
+    axes[0].legend(loc="upper left")
+    axes[-1].set_xlabel("refit date")
     fig.tight_layout()
     return _finish(fig, out_path)

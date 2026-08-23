@@ -6,9 +6,9 @@ Usage
     python run_all.py --stage data
     python run_all.py --all
 
-``data`` is implemented (Stage 0). ``backtest``, ``evaluate`` and ``figures`` are still
-stubs and raise ``NotImplementedError``: their interfaces exist so they can be reviewed
-before any implementation is written.
+``data``, ``eda`` and ``backtest`` are implemented (Stages 0-2). ``evaluate`` and
+``figures`` are still stubs and raise ``NotImplementedError``: their interfaces exist so
+they can be reviewed before any implementation is written.
 
 Stages run in the order listed and each depends on its predecessor's artefacts in
 ``data/processed/``.
@@ -34,8 +34,8 @@ STAGE_HELP: dict[str, str] = {
            "(Engle LM, Ljung-Box, ADF) on the training window, and render the "
            "Stage 0 figures.",
     "backtest": "Walk forward through the out-of-sample period, refitting every 21 "
-                "trading days, producing daily forecasts and predictive intervals "
-                "for all four models.",
+                "trading days and filtering daily in between, producing forecasts and "
+                "predictive intervals for every model built so far.",
     "evaluate": "Compute QLIKE and variance MSE, interval coverage, VaR backtests, "
                 "Diebold-Mariano comparisons, and block-bootstrap intervals.",
     "figures": "Render the figures used in report/report.md.",
@@ -160,13 +160,19 @@ def stage_eda(args: argparse.Namespace) -> None:
 def stage_backtest(args: argparse.Namespace) -> None:
     """Run the walk-forward backtest and persist forecasts and refit diagnostics.
 
-    Stage 1 produces the two baselines. The GARCH models join the same loop at Stages 2
-    and 3 without the loop itself changing.
+    Stage 1 produced the two baselines; Stage 2 added the frequentist GARCH(1,1)-t and
+    its normal-innovation ablation, which join the same loop without the loop changing.
+    The Bayesian model joins at Stage 3 the same way.
+
+    Takes about a minute: 204 maximum-likelihood fits, 102 per GARCH variant.
     """
+    from dataclasses import asdict
+
     import pandas as pd
 
     from src import backtest as B
-    from src import figures
+    from src import eda, figures, models
+    from src.data import TRAIN_END, TRAIN_START
 
     frame_path = PROCESSED_DIR / "analysis_frame.csv"
     if not frame_path.exists():
@@ -178,30 +184,91 @@ def stage_backtest(args: argparse.Namespace) -> None:
     config = B.BacktestConfig(mcmc_seed=args.seed)
     print(f"proxy scale c = {config.proxy_scale_c:.6f}  (frozen, warm-up only)")
     forecasts, records = B.run_backtest(frame, config)
+    record_frame = pd.DataFrame([asdict(r) for r in records])
 
-    print(f"models    : {', '.join(B.BASELINE_MODELS)}")
-    print(f"refits    : {len(records)} at a {config.refit_every}-day cadence")
-    for model in B.BASELINE_MODELS:
+    n_refits = record_frame["refit_id"].nunique()
+    print(f"models    : {', '.join(B.MODELS)}")
+    print(f"refits    : {n_refits} at a {config.refit_every}-day cadence")
+    for model in B.MODELS:
         sub = forecasts[forecasts.model == model]
         ann = (sub["variance"].mean() * 252) ** 0.5
         print(
-            f"  {model:<10} {len(sub):,} rows, "
+            f"  {model:<18} {len(sub):,} rows, "
             f"{sub['variance'].notna().sum():,} finite, "
             f"mean annualised vol {ann:.2%}"
         )
+
+    # Convergence is reported whether or not it is good news. A refit that failed
+    # produces no forecasts for its block, so a silent failure would show up only as a
+    # gap in a table nobody reads.
+    print()
+    for model in B.GARCH_MODELS:
+        fits = record_frame[record_frame["model"] == model]
+        failed = fits[~fits["mle_converged"]]
+        print(
+            f"  {model:<18} {len(fits) - len(failed)}/{len(fits)} refits converged, "
+            f"{fits['seconds_elapsed'].sum():.1f}s total"
+        )
+        for _, bad in failed.iterrows():
+            print(
+                f"    !! {bad['refit_date'].date()} did NOT converge: "
+                f"{bad['mle_message']}  ({config.refit_every} days have no forecast)"
+            )
 
     written = B.save_forecasts(forecasts, records, config, PROCESSED_DIR)
     for path in written:
         print(f"wrote {path}")
 
-    fig_path = figures.plot_forecasts_vs_realised(
-        forecasts,
-        frame,
-        FIGURES_DIR / "05_baseline_forecasts_covid.png",
-        start="2019-11-01",
-        end="2020-06-30",
-    )
-    print(f"wrote {fig_path}")
+    # --- Warm-up residual diagnostics -------------------------------------------
+    #
+    # Computed on the first fit, whose estimation window is the warm-up block, so
+    # nothing here has seen an out-of-sample observation.
+    warmup_returns = frame.loc[TRAIN_START:TRAIN_END, "log_return"].dropna()
+    warmup_values = warmup_returns.to_numpy(dtype=float)
+    h0 = models.backcast_initial_variance(warmup_values)
+    warmup_fit = models.fit_garch_mle(warmup_values, h0=h0)
+    resid = models.standardised_residuals(warmup_fit.params, warmup_values, h0)
+    resid_series = pd.Series(resid, index=warmup_returns.index)
+
+    print()
+    print(f"warm-up GARCH(1,1)-t fit ({warmup_fit.n_obs} obs, "
+          f"{warmup_returns.index.min().date()}..{warmup_returns.index.max().date()})")
+    p = warmup_fit.params
+    print(f"  mu={p.mu:.6f}  omega={p.omega:.4e}  alpha={p.alpha:.4f}  "
+          f"beta={p.beta:.4f}  alpha+beta={p.alpha + p.beta:.4f}  nu={p.nu:.2f}")
+    print(f"  loglik={warmup_fit.loglik:.2f}  converged={warmup_fit.converged}")
+    print("  standardised-residual diagnostics (no rejection is the good outcome):")
+    for lags in (5, 10, 22):
+        levels = eda.ljung_box_test(resid_series, lags, label="std. residuals")
+        squares = eda.ljung_box_test(resid_series**2, lags, label="squared std. residuals")
+        print(f"    lag {lags:>2}: levels p = {levels.p_value:.4f}, "
+              f"squares p = {squares.p_value:.4f}")
+
+    acf_levels = eda.series_acf(resid_series)
+    acf_squares = eda.squared_return_acf(resid_series)
+
+    written_figures = [
+        figures.plot_forecasts_vs_realised(
+            forecasts,
+            frame,
+            FIGURES_DIR / "05_baseline_forecasts_covid.png",
+            start="2019-11-01",
+            end="2020-06-30",
+        ),
+        figures.plot_garch_residual_diagnostics(
+            resid,
+            warmup_fit.params.nu,
+            FIGURES_DIR / "06_garch_residual_diagnostics.png",
+            acf_levels=acf_levels,
+            acf_squares=acf_squares,
+        ),
+        figures.plot_parameter_stability(
+            record_frame, FIGURES_DIR / "07_garch_parameter_stability.png"
+        ),
+    ]
+    print()
+    for path in written_figures:
+        print(f"wrote {path}")
 
 
 def stage_evaluate(args: argparse.Namespace) -> None:

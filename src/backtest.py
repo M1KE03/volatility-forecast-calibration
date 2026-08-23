@@ -15,12 +15,12 @@ There are two distinct cadences, and conflating them is the most likely subtle b
   the design intends and would not be a GARCH forecast at all.
 
 Neither baseline has an estimated parameter -- EWMA's decay is fixed at the RiskMetrics
-value and the random walk has none -- so the refit cadence is a genuine no-op for the
-two models implemented here. The scaffolding exists now and is first exercised by GARCH
-at Stages 2 and 3. Building it before the models it serves is deliberate: the governing
-plan puts the harness first precisely because it is the component where look-ahead bugs
-live, and a harness validated on models with no moving parts is a harness whose failures
-can only be its own.
+value and the random walk has none -- so the refit cadence is a genuine no-op for those
+two. It was built before the models it serves on purpose: the governing plan puts the
+harness first precisely because it is the component where look-ahead bugs live, and a
+harness validated on models with no moving parts is a harness whose failures can only be
+its own. Stage 2's two GARCH models are the first to exercise it for real; the Bayesian
+model joins at Stage 3 through the same path.
 
 Invariants
 ----------
@@ -50,6 +50,7 @@ it raises rather than silently producing a result nobody chose.
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import asdict, dataclass
 from enum import Enum
 from pathlib import Path
@@ -58,9 +59,11 @@ import numpy as np
 import pandas as pd
 
 from src import data as D
+from src import models as M
 from src.models import (
     EWMA_LAMBDA,
     Forecast,
+    GarchParams,
     NormalPredictive,
     forecast_ewma,
     forecast_yesterday_volatility,
@@ -73,8 +76,30 @@ REFIT_EVERY = 21
 TWO_SIDED_LEVELS: tuple[float, ...] = (0.90, 0.95, 0.99)
 VAR_LEVEL = 0.99
 
-#: Models produced by this module. GARCH entries are appended at Stages 2 and 3.
+#: Models produced by this module. ``garch_bayes`` is appended at Stage 3.
 BASELINE_MODELS: tuple[str, ...] = ("yesterday", "ewma")
+
+#: GARCH models fitted by maximum likelihood (Stage 2).
+GARCH_MODELS: tuple[str, ...] = ("garch_mle", "garch_mle_normal")
+
+#: Innovation distribution behind each GARCH model.
+INNOVATION_BY_MODEL: dict[str, str] = {
+    "garch_mle": "t",
+    "garch_mle_normal": "normal",
+}
+
+#: Every model the backtest produces, in report order.
+MODELS: tuple[str, ...] = BASELINE_MODELS + GARCH_MODELS
+
+#: The models that belong in the headline comparison.
+#:
+#: ``garch_mle_normal`` is an **ablation**, not a competitor: it exists to show what the
+#: Student-t innovation buys at the 99% level (governing plan, Stage 6). It is carried
+#: through the full backtest because doing so costs one extra fit per refit and saves
+#: re-entering this loop at Stage 6 -- but it must not quietly acquire a row in the
+#: four-model tables, so the evaluation layer filters on this tuple rather than on
+#: whatever happens to be in the forecast file.
+HEADLINE_MODELS: tuple[str, ...] = ("yesterday", "ewma", "garch_mle")
 
 #: Predictive mean assumed by both baselines.
 #:
@@ -146,6 +171,11 @@ class RefitRecord:
 
     The Bayesian fields are NUTS diagnostics (decision B1-R) and are NaN for the
     baseline-only runs of Stage 1, which estimate nothing.
+
+    One record per (refit date, model). The parameter fields make this table the audit
+    trail for all 102 fits per model as well as the diagnostics log -- the
+    parameter-stability figure reads it directly, so the plotted estimates and the
+    recorded ones cannot drift apart.
     """
 
     refit_id: int
@@ -153,9 +183,15 @@ class RefitRecord:
     train_start: pd.Timestamp
     train_end: pd.Timestamp
     n_obs: int
+    model: str = "baseline"
     mle_converged: bool = True
     mle_message: str = "no parameters estimated at this stage"
     mle_loglik: float = float("nan")
+    mu: float = float("nan")
+    omega: float = float("nan")
+    alpha: float = float("nan")
+    beta: float = float("nan")
+    nu: float = float("nan")
     max_r_hat: float = float("nan")
     min_ess_bulk: float = float("nan")
     min_ess_tail: float = float("nan")
@@ -254,6 +290,145 @@ def build_baseline_variances(
     return {"yesterday": yesterday, "ewma": ewma}
 
 
+#: Columns every model's path frame carries. ``mu`` is the predictive mean; ``nu`` is
+#: NaN wherever the predictive distribution is Gaussian, which is how the row builder
+#: decides which distribution to construct.
+PATH_COLUMNS: tuple[str, ...] = ("variance", "mu", "nu")
+
+
+def _baseline_paths(
+    frame: pd.DataFrame, config: BacktestConfig, oos_index: pd.DatetimeIndex
+) -> dict[str, pd.DataFrame]:
+    """Wrap the baseline variance series in the common path schema."""
+    variances = build_baseline_variances(frame, config)
+    paths: dict[str, pd.DataFrame] = {}
+    for model in BASELINE_MODELS:
+        path = pd.DataFrame(index=oos_index, columns=list(PATH_COLUMNS), dtype=float)
+        path["variance"] = variances[model].reindex(oos_index)
+        path["mu"] = BASELINE_MEAN
+        path["nu"] = np.nan
+        paths[model] = path
+    return paths
+
+
+def build_garch_paths(
+    frame: pd.DataFrame,
+    config: BacktestConfig,
+    *,
+    model: str,
+) -> tuple[pd.DataFrame, list[RefitRecord]]:
+    """Variance path and refit diagnostics for one GARCH model.
+
+    The GARCH analogue of ``build_baseline_variances``, and the first thing in this
+    project that actually uses the refit cadence.
+
+    **The two cadences, which is the whole point of this function.** At each of the 102
+    refit dates the parameters are re-estimated on the expanding window, which ends
+    strictly before the refit date. *Between* refits the parameters are held fixed but
+    the variance recursion still advances daily: ``garch11_filter`` is run forward with
+    those fixed parameters and ``h[t]`` is read off for every date in the block. Because
+    ``h[t]`` is defined as the conditional variance of ``returns[t]`` given information
+    through ``t-1``, the daily update falls out of the indexing rather than needing a
+    second loop -- and a forecast is never more than one day stale.
+
+    Freezing ``h`` between refits as well would leave forecasts up to 21 days out of
+    date and would not be a GARCH forecast at all. Pinned by
+    ``test_variance_moves_daily_while_parameters_are_held_fixed``.
+
+    ``h0`` is backcast from the estimation window and seeds the recursion at the first
+    observation of the sample, exactly as it does inside the likelihood being maximised,
+    so the fit and the forecast path share one convention. By the time the recursion
+    reaches the evaluation window its influence has decayed through at least 756 factors
+    of ``beta``.
+
+    A refit whose optimiser did not converge, or which landed outside the admissible
+    region, produces **no forecasts for its block**: the dates stay NaN and the failure
+    is written into the ``RefitRecord``. Carrying the previous window's parameters
+    forward would hide a failed fit behind plausible numbers, which is the one thing the
+    ``converged`` flag exists to prevent.
+    """
+    if model not in INNOVATION_BY_MODEL:
+        raise ValueError(f"{model!r} is not a GARCH model; expected one of {GARCH_MODELS}")
+    innovation = INNOVATION_BY_MODEL[model]
+
+    full_index = pd.DatetimeIndex(frame.index)
+    returns = frame["log_return"].to_numpy(dtype=float)
+
+    oos = frame.loc[pd.Timestamp(D.OOS_START) : pd.Timestamp(D.OOS_END)]
+    oos_index = pd.DatetimeIndex(oos.index)
+    refit_dates = make_refit_dates(oos_index, refit_every=config.refit_every)
+
+    path = pd.DataFrame(index=oos_index, columns=list(PATH_COLUMNS), dtype=float)
+    records: list[RefitRecord] = []
+
+    for refit_id, refit_date in enumerate(refit_dates):
+        window = estimation_slice(full_index, refit_date, config)
+        train = returns[window]
+        h0 = M.backcast_initial_variance(train)
+
+        started = time.perf_counter()
+        fit = M.fit_garch_mle(train, h0=h0, innovation=innovation)
+        elapsed = time.perf_counter() - started
+
+        # Dates this fit serves: from its own refit date up to the day before the next.
+        block_start = int(oos_index.searchsorted(refit_date, side="left"))
+        block_stop = (
+            int(oos_index.searchsorted(refit_dates[refit_id + 1], side="left"))
+            if refit_id + 1 < len(refit_dates)
+            else len(oos_index)
+        )
+        block = oos_index[block_start:block_stop]
+
+        if fit.converged and len(block) > 0:
+            # Filter forward through the last date in the block. h[t] for t in the block
+            # depends on returns strictly before t, so this reaches no further than it
+            # is allowed to.
+            stop = int(full_index.searchsorted(block[-1], side="right"))
+            h = M.garch11_filter(fit.params.to_array(), returns[:stop], h0)
+            positions = full_index.searchsorted(block.to_numpy(), side="left")
+            path.loc[block, "variance"] = h[positions]
+            path.loc[block, "mu"] = fit.params.mu
+            path.loc[block, "nu"] = fit.params.nu
+
+        records.append(
+            RefitRecord(
+                refit_id=refit_id,
+                refit_date=refit_date,
+                train_start=full_index[window.start],
+                train_end=full_index[window.stop - 1],
+                n_obs=fit.n_obs,
+                model=model,
+                mle_converged=fit.converged,
+                mle_message=fit.message,
+                mle_loglik=fit.loglik,
+                mu=fit.params.mu,
+                omega=fit.params.omega,
+                alpha=fit.params.alpha,
+                beta=fit.params.beta,
+                nu=fit.params.nu,
+                seconds_elapsed=elapsed,
+            )
+        )
+
+    return path, records
+
+
+def _predictive(model: str, variance: float, mu: float, nu: float):
+    """Build the predictive distribution for one model-day.
+
+    The GARCH models go through ``models.plugin_predictive`` -- conditioning on the MLE
+    as though it were the truth, which is exactly the approximation Stage 3 tests. The
+    baselines get a Gaussian directly (decision D12): they are the naive-UQ baseline and
+    have no fitted innovation distribution to plug in.
+    """
+    if model in GARCH_MODELS:
+        params = GarchParams(
+            mu=mu, omega=float("nan"), alpha=float("nan"), beta=float("nan"), nu=nu
+        )
+        return M.plugin_predictive(params, variance)
+    return NormalPredictive(mean=mu, variance=variance)
+
+
 def run_backtest(
     frame: pd.DataFrame,
     config: BacktestConfig | None = None,
@@ -289,7 +464,10 @@ def run_backtest(
         governing plan asks for tidy output, and every downstream consumer groups by
         model or by regime, which wide format would make awkward.
     records:
-        One ``RefitRecord`` per refit. Must be persisted and inspected, not discarded.
+        One ``RefitRecord`` per (refit, model) -- the baselines contribute one row per
+        refit recording the estimation window, each GARCH model one row per refit
+        carrying its estimates, log-likelihood and convergence verdict. Must be
+        persisted and inspected, not discarded.
     """
     config = config or BacktestConfig()
 
@@ -299,8 +477,6 @@ def run_backtest(
         raise ValueError(f"analysis frame is missing columns: {sorted(missing)}")
     if not frame.index.is_monotonic_increasing:
         raise ValueError("analysis frame index must be sorted ascending")
-
-    variances = build_baseline_variances(frame, config)
 
     oos = frame.loc[pd.Timestamp(D.OOS_START) : pd.Timestamp(D.OOS_END)]
     if oos.empty:
@@ -314,27 +490,42 @@ def run_backtest(
         index=oos_index,
     )
 
+    paths = _baseline_paths(frame, config, oos_index)
+    # One record per refit for the baselines too: they estimate nothing, but the
+    # estimation window is a property of the run rather than of a model, and recording
+    # it once per refit keeps the refit table readable next to the GARCH rows.
     records = [
         RefitRecord(
-            refit_id=i,
+            refit_id=refit_id,
             refit_date=refit_date,
             train_start=frame.index[0],
-            train_end=frame.index[estimation_slice(pd.DatetimeIndex(frame.index), refit_date, config).stop - 1],
-            n_obs=estimation_slice(pd.DatetimeIndex(frame.index), refit_date, config).stop,
+            train_end=frame.index[
+                estimation_slice(pd.DatetimeIndex(frame.index), refit_date, config).stop - 1
+            ],
+            n_obs=estimation_slice(
+                pd.DatetimeIndex(frame.index), refit_date, config
+            ).stop,
         )
-        for i, refit_date in enumerate(refit_dates)
+        for refit_id, refit_date in enumerate(refit_dates)
     ]
+
+    for model in GARCH_MODELS:
+        path, garch_records = build_garch_paths(frame, config, model=model)
+        paths[model] = path
+        records.extend(garch_records)
 
     probs, quantile_names = _quantile_levels(config)
     scaled_proxy = D.scale_proxy(frame["parkinson_var"], c=config.proxy_scale_c)
 
     rows: list[dict[str, object]] = []
-    for model in BASELINE_MODELS:
-        variance_path = variances[model]
+    for model in MODELS:
+        path = paths[model]
         for date in oos_index:
-            variance = float(variance_path.loc[date])
+            variance = float(path.at[date, "variance"])
+            mu = float(path.at[date, "mu"])
+            nu = float(path.at[date, "nu"])
             realised = float(oos.loc[date, "log_return"])
-            if not np.isfinite(variance) or variance <= 0.0:
+            if not np.isfinite(variance) or variance <= 0.0 or not np.isfinite(mu):
                 # Recorded, not dropped: a missing forecast is a fact about the model
                 # and must survive into the evaluation layer rather than vanish.
                 row: dict[str, object] = {
@@ -348,8 +539,8 @@ def run_backtest(
             else:
                 forecast = Forecast(
                     variance=variance,
-                    mean=BASELINE_MEAN,
-                    distribution=NormalPredictive(mean=BASELINE_MEAN, variance=variance),
+                    mean=mu,
+                    distribution=_predictive(model, variance, mu, nu),
                 )
                 quantiles = forecast.distribution.quantile(probs)
                 row = {

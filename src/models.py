@@ -44,19 +44,23 @@ that a predictive interval built from it can be compared against an observed ret
 The Parkinson proxy does not arrive on that scale; ``data.scale_proxy`` converts it
 before it reaches ``forecast_yesterday_volatility``. See ``data.PROXY_SCALE_C``.
 
-Status: the GARCH half is still stubbed. The predictive-distribution interface and both
-baselines are implemented (Stage 1). Priors are set at Stage 3 and must be frozen in
+Status: the frequentist half is complete (Stage 2) -- the shared likelihood, the MLE, and
+the plug-in predictive, alongside the interface and both baselines from Stage 1. The
+Bayesian half is stubbed: ``log_prior``, ``log_posterior``, ``sample_garch_posterior``
+and ``posterior_predictive`` arrive at Stage 3, and the priors must be frozen in
 research_log.md before any out-of-sample result is computed.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol
 
+import numba
 import numpy as np
 import pandas as pd
-from scipy import stats
+from scipy import optimize, stats
+from scipy.special import gammaln
 
 # --- The forecaster interface -----------------------------------------------------
 #
@@ -119,6 +123,48 @@ class NormalPredictive:
 
 
 @dataclass(frozen=True)
+class StudentTPredictive:
+    """Standardised Student-t predictive distribution, used by the GARCH-t models.
+
+    ``variance`` is the conditional variance of the **return**, not a scale parameter.
+    A raw Student-t with ``nu`` degrees of freedom has variance ``nu / (nu - 2)``, so
+    turning a variance into a scale requires
+
+        scale = sqrt(variance) * sqrt((nu - 2) / nu)
+
+    Dropping that second factor is the error this class exists to make impossible. It
+    inflates every interval by a few percent -- about 4% at nu = 6 -- and it does so in
+    the direction that flatters the Bayesian model at Stage 3, whose intervals are
+    supposed to come out wider for a reason that has nothing to do with a missing
+    constant. ``test_dropping_the_standardisation_factor_would_widen_intervals`` proves
+    the factor is load-bearing rather than decorative.
+    """
+
+    mean: float
+    variance: float
+    nu: float
+
+    def __post_init__(self) -> None:
+        if not np.isfinite(self.variance) or self.variance <= 0.0:
+            raise ValueError(f"variance must be finite and positive, got {self.variance!r}")
+        if not np.isfinite(self.nu) or self.nu <= 2.0:
+            raise ValueError(f"nu must be finite and greater than 2, got {self.nu!r}")
+
+    @property
+    def scale(self) -> float:
+        """Scale parameter of the underlying raw Student-t."""
+        return float(np.sqrt(self.variance) * np.sqrt((self.nu - 2.0) / self.nu))
+
+    def quantile(self, q: np.ndarray) -> np.ndarray:
+        return np.asarray(
+            stats.t.ppf(q, self.nu, loc=self.mean, scale=self.scale), dtype=float
+        )
+
+    def cdf(self, r: float) -> float:
+        return float(stats.t.cdf(r, self.nu, loc=self.mean, scale=self.scale))
+
+
+@dataclass(frozen=True)
 class Forecast:
     """One model's one-day-ahead forecast for one date.
 
@@ -153,16 +199,34 @@ class GarchParams:
 
     def to_array(self) -> np.ndarray:
         """Return the parameters in ``PARAM_NAMES`` order."""
-        raise NotImplementedError("GarchParams.to_array")
+        return np.array([self.mu, self.omega, self.alpha, self.beta, self.nu], dtype=float)
 
     @classmethod
     def from_array(cls, theta: np.ndarray) -> GarchParams:
         """Build from a flat vector in ``PARAM_NAMES`` order."""
-        raise NotImplementedError("GarchParams.from_array")
+        values = np.asarray(theta, dtype=float)
+        if values.shape != (len(PARAM_NAMES),):
+            raise ValueError(
+                f"theta must have shape ({len(PARAM_NAMES)},), got {values.shape}"
+            )
+        return cls(*(float(v) for v in values))
 
     def is_valid(self) -> bool:
-        """True if the parameters satisfy positivity, stationarity, and nu > 4."""
-        raise NotImplementedError("GarchParams.is_valid")
+        """True if the parameters satisfy positivity, stationarity, and nu > 4.
+
+        ``nu`` is NaN for the normal-innovation variant, where the degrees of freedom
+        are not a parameter at all; the ``nu > 4`` constraint is vacuous there and is
+        skipped rather than failed. Every other constraint applies to both variants.
+        """
+        if not np.isfinite([self.mu, self.omega, self.alpha, self.beta]).all():
+            return False
+        if self.omega <= 0.0 or self.alpha < 0.0 or self.beta < 0.0:
+            return False
+        if self.alpha + self.beta >= 1.0:
+            return False
+        if np.isnan(self.nu):
+            return True  # normal innovations: nu is not a parameter
+        return bool(np.isfinite(self.nu) and self.nu > 4.0)
 
 
 @dataclass(frozen=True)
@@ -237,8 +301,42 @@ def garch11_filter(theta: np.ndarray, returns: np.ndarray, h0: float) -> np.ndar
 
     ``h0`` seeds ``h[0]`` and must be backcast from the **training** returns only
     (decision D5), never from the full sample.
+
+    Parameter validity is the caller's responsibility: the likelihood functions below
+    check ``is_valid`` before calling this, and the backtest only ever passes a fitted
+    parameter vector. Handed an inadmissible vector this will happily produce negative
+    variances rather than silently clamping them, because a clamp would turn a bug into
+    a plausible number.
     """
-    raise NotImplementedError("garch11_filter")
+    values = np.asarray(returns, dtype=float)
+    if values.ndim != 1:
+        raise ValueError(f"returns must be one-dimensional, got shape {values.shape}")
+    if not np.isfinite(h0) or h0 <= 0.0:
+        raise ValueError(f"h0 must be finite and positive, got {h0!r}")
+    mu, omega, alpha, beta, _nu = (float(v) for v in np.asarray(theta, dtype=float))
+    return _filter_kernel(values, mu, omega, alpha, beta, float(h0))
+
+
+@numba.njit(cache=True)
+def _filter_kernel(
+    returns: np.ndarray, mu: float, omega: float, alpha: float, beta: float, h0: float
+) -> np.ndarray:  # pragma: no cover - compiled; covered through ``garch11_filter``
+    """The recursion itself, compiled (decision B1).
+
+    Sequential and therefore the pipeline's hot loop: the backtest runs it 204 times
+    for the forecast paths and some hundreds of thousands of times inside the optimiser.
+    In pure Python the multi-start MLE over 102 refits takes tens of minutes; compiled
+    it takes under a minute.
+    """
+    n = returns.shape[0]
+    h = np.empty(n, dtype=np.float64)
+    if n == 0:
+        return h
+    h[0] = h0
+    for t in range(1, n):
+        resid = returns[t - 1] - mu
+        h[t] = omega + alpha * resid * resid + beta * h[t - 1]
+    return h
 
 
 def garch11_t_loglik(theta: np.ndarray, returns: np.ndarray, h0: float) -> float:
@@ -248,9 +346,80 @@ def garch11_t_loglik(theta: np.ndarray, returns: np.ndarray, h0: float) -> float
     so the same function can be handed to an optimiser and to an MCMC sampler.
 
     Uses the *standardised* Student-t density (unit variance), so that ``h_t`` from
-    ``garch11_filter`` is the conditional variance directly.
+    ``garch11_filter`` is the conditional variance directly:
+
+        z_t = (r_t - mu) / sqrt(h_t)
+        ll_t = lgamma((nu+1)/2) - lgamma(nu/2) - 0.5*log(pi*(nu-2))
+               - 0.5*log(h_t)
+               - ((nu+1)/2) * log(1 + z_t^2/(nu-2))
+
+    The ``-0.5*log(h_t)`` term is the Jacobian of ``r_t = mu + sqrt(h_t) * z_t``. It is
+    the classic silent omission in a hand-written GARCH likelihood: without it the
+    optimiser still converges and the estimates still look plausible, but every variance
+    is wrong and nothing anywhere fails. It is pinned by
+    ``test_t_loglik_matches_an_independent_scipy_implementation``, which computes the
+    same quantity a completely different way rather than restating this formula.
     """
-    raise NotImplementedError("garch11_t_loglik")
+    params = GarchParams.from_array(theta)
+    if not params.is_valid() or np.isnan(params.nu):
+        return -np.inf
+
+    values = np.asarray(returns, dtype=float)
+    h = garch11_filter(theta, values, h0)
+    if not np.all(np.isfinite(h)) or np.any(h <= 0.0):
+        return -np.inf
+
+    nu = params.nu
+    z_squared = (values - params.mu) ** 2 / h
+    constant = (
+        gammaln(0.5 * (nu + 1.0))
+        - gammaln(0.5 * nu)
+        - 0.5 * np.log(np.pi * (nu - 2.0))
+    )
+    ll = (
+        values.size * constant
+        - 0.5 * np.sum(np.log(h))
+        - 0.5 * (nu + 1.0) * np.sum(np.log1p(z_squared / (nu - 2.0)))
+    )
+    return float(ll) if np.isfinite(ll) else -np.inf
+
+
+def garch11_normal_loglik(theta: np.ndarray, returns: np.ndarray, h0: float) -> float:
+    """Log-likelihood of the GARCH(1,1) model with **Gaussian** innovations.
+
+    The Stage 6 ablation. Normal versus t is the cheap, decisive lever on 99% tail
+    coverage, and fitting it now costs almost nothing because it shares
+    ``garch11_filter`` with the t version.
+
+    Deliberately a separate function rather than a branch inside ``garch11_t_loglik``:
+    the project's central claim is that models 3 and 4 share *one* likelihood, and that
+    is a stronger claim if the function they share has no innovation-distribution switch
+    in it. ``theta[4]`` (``nu``) is ignored -- overwritten with NaN before validation, so
+    that the value passed in genuinely cannot affect the result.
+    """
+    supplied = GarchParams.from_array(theta)
+    params = GarchParams(
+        mu=supplied.mu,
+        omega=supplied.omega,
+        alpha=supplied.alpha,
+        beta=supplied.beta,
+        nu=float("nan"),
+    )
+    if not params.is_valid():
+        return -np.inf
+
+    values = np.asarray(returns, dtype=float)
+    h = garch11_filter(theta, values, h0)
+    if not np.all(np.isfinite(h)) or np.any(h <= 0.0):
+        return -np.inf
+
+    z_squared = (values - params.mu) ** 2 / h
+    ll = -0.5 * np.sum(np.log(2.0 * np.pi) + np.log(h) + z_squared)
+    return float(ll) if np.isfinite(ll) else -np.inf
+
+
+#: The two innovation distributions, keyed by the name used throughout the backtest.
+LOGLIK_BY_INNOVATION = {"t": garch11_t_loglik, "normal": garch11_normal_loglik}
 
 
 def log_prior(theta: np.ndarray) -> float:
@@ -283,24 +452,241 @@ def backcast_initial_variance(returns: np.ndarray) -> float:
     Must be called on the estimation window alone. Passing the full sample here would
     leak future information into every fit.
     """
-    raise NotImplementedError("backcast_initial_variance")
+    values = np.asarray(returns, dtype=float)
+    finite = values[np.isfinite(values)]
+    if finite.size < 2:
+        raise ValueError("need at least two finite returns to backcast h0")
+    h0 = float(np.var(finite, ddof=1))
+    if not np.isfinite(h0) or h0 <= 0.0:
+        raise ValueError(f"backcast variance must be finite and positive, got {h0!r}")
+    return h0
+
+
+def standardised_residuals(
+    params: GarchParams, returns: np.ndarray, h0: float
+) -> np.ndarray:
+    """``(r_t - mu) / sqrt(h_t)`` -- the residual diagnostics' input.
+
+    Under correct specification these are i.i.d. draws from the standardised innovation
+    distribution: no autocorrelation in the levels (the mean equation is adequate) and
+    none in the squares (the variance equation has absorbed the clustering). Both are
+    tested with ``eda.ljung_box_test``, and the QQ plot checks the tail shape against
+    the fitted t.
+    """
+    values = np.asarray(returns, dtype=float)
+    h = garch11_filter(params.to_array(), values, h0)
+    return (values - params.mu) / np.sqrt(h)
 
 
 # --- Estimation -------------------------------------------------------------------
+
+
+#: Internal fitting scale. The likelihood is maximised on ``returns * FIT_SCALE`` and
+#: the estimates are converted back before they leave this module, so nothing outside
+#: ``fit_garch_mle`` ever sees the percent convention.
+#:
+#: Daily SPY log returns have a standard deviation near 0.011, which puts ``omega`` at
+#: around 1e-6 -- below L-BFGS-B's default convergence tolerances, so the optimiser
+#: stops on a parameter it has barely moved. On the percent scale ``omega`` is around
+#: 0.02 and the five parameters are within a couple of orders of magnitude of each
+#: other. The Stage 3 feasibility probe found the same thing about the sampler's
+#: geometry, so using it here keeps the two stages on one convention.
+FIT_SCALE = 100.0
+
+#: Fixed multi-start grid. Fixed rather than random so that a refit is reproducible
+#: bit-for-bit; ``(alpha, beta)`` pairs that violate stationarity are dropped rather
+#: than started from the boundary.
+_START_ALPHAS = (0.05, 0.10, 0.20)
+_START_BETAS = (0.75, 0.85, 0.90)
+_START_NUS = (5.0, 8.0, 15.0)
+
+#: Value the objective returns where the likelihood is ``-inf``. L-BFGS-B approximates
+#: its gradient by finite differences and cannot step through an infinite wall, so the
+#: barrier has to be finite even though the likelihood itself is not.
+_PENALTY = 1e10
+
+
+def _fit_bounds(innovation: str) -> list[tuple[float, float]]:
+    """Box constraints on the percent scale, in ``PARAM_NAMES`` order."""
+    bounds = [
+        (-5.0, 5.0),  # mu
+        (1e-8, 10.0),  # omega
+        (1e-8, 0.999),  # alpha
+        (1e-8, 0.999),  # beta
+    ]
+    # nu > 4 keeps the kurtosis finite; the upper bound is where the t is numerically
+    # indistinguishable from a normal and the likelihood is flat in nu.
+    bounds.append((4.001, 300.0) if innovation == "t" else (4.0, 4.0))
+    return bounds
+
+
+def _start_grid(returns: np.ndarray, innovation: str) -> list[np.ndarray]:
+    """Deterministic starting points, on the percent scale."""
+    mu0 = float(np.mean(returns))
+    var0 = float(np.var(returns, ddof=1))
+    nus = _START_NUS if innovation == "t" else (4.0,)
+
+    starts: list[np.ndarray] = []
+    for alpha in _START_ALPHAS:
+        for beta in _START_BETAS:
+            if alpha + beta >= 0.995:
+                continue
+            omega = var0 * (1.0 - alpha - beta)
+            for nu in nus:
+                starts.append(np.array([mu0, omega, alpha, beta, nu], dtype=float))
+    return starts
 
 
 def fit_garch_mle(
     returns: np.ndarray,
     *,
     h0: float | None = None,
+    innovation: Literal["t", "normal"] = "t",
     start_params: np.ndarray | None = None,
 ) -> FrequentistFit:
     """Maximise ``garch11_t_loglik`` via ``scipy.optimize``.
 
     Convergence failures are returned in the ``FrequentistFit``, never swallowed and
     never silently retried into a spurious success.
+
+    Parameters
+    ----------
+    returns:
+        Estimation-window returns, on the raw return scale.
+    h0:
+        Seed for the variance recursion. Defaults to ``backcast_initial_variance`` of
+        ``returns`` -- which is correct precisely because ``returns`` is the estimation
+        window and nothing else.
+    innovation:
+        ``"t"`` for the headline model, ``"normal"`` for the Stage 6 ablation. The
+        normal variant returns ``nu = nan``: it has no degrees-of-freedom parameter, and
+        recording it as NaN rather than as some sentinel number means anything that
+        forgets to branch on it produces a NaN rather than a plausible-looking result.
+    start_params:
+        Optional single starting point on the **raw** return scale, used instead of the
+        multi-start grid. For tests and diagnostics; the backtest never passes it.
+
+    Notes
+    -----
+    Optimisation runs on ``returns * FIT_SCALE`` (see that constant). Every value in the
+    returned ``FrequentistFit`` -- parameters and log-likelihood alike -- is converted
+    back to the raw return scale, so the percent convention is invisible from outside.
     """
-    raise NotImplementedError("fit_garch_mle")
+    if innovation not in LOGLIK_BY_INNOVATION:
+        raise ValueError(f"innovation must be 't' or 'normal', got {innovation!r}")
+
+    values = np.asarray(returns, dtype=float)
+    values = values[np.isfinite(values)]
+    if values.size < 30:
+        raise ValueError(
+            f"need at least 30 finite returns to fit GARCH(1,1), got {values.size}"
+        )
+
+    h0_raw = backcast_initial_variance(values) if h0 is None else float(h0)
+    if not np.isfinite(h0_raw) or h0_raw <= 0.0:
+        raise ValueError(f"h0 must be finite and positive, got {h0!r}")
+
+    scaled = values * FIT_SCALE
+    h0_scaled = h0_raw * FIT_SCALE**2
+    loglik_fn = LOGLIK_BY_INNOVATION[innovation]
+
+    def negative_loglik(theta: np.ndarray) -> float:
+        ll = loglik_fn(theta, scaled, h0_scaled)
+        return _PENALTY if not np.isfinite(ll) else -ll
+
+    if start_params is not None:
+        raw_start = np.asarray(start_params, dtype=float)
+        starts = [
+            np.array(
+                [
+                    raw_start[0] * FIT_SCALE,
+                    raw_start[1] * FIT_SCALE**2,
+                    raw_start[2],
+                    raw_start[3],
+                    raw_start[4] if innovation == "t" else 4.0,
+                ],
+                dtype=float,
+            )
+        ]
+    else:
+        starts = _start_grid(scaled, innovation)
+
+    bounds = _fit_bounds(innovation)
+    lower = [lo for lo, _ in bounds]
+    upper = [hi for _, hi in bounds]
+
+    results: list[optimize.OptimizeResult] = []
+    for start in starts:
+        clipped = np.clip(start, lower, upper)
+        results.append(
+            optimize.minimize(
+                negative_loglik, clipped, method="L-BFGS-B", bounds=bounds
+            )
+        )
+
+    # Pick the best optimum **among the starts that actually converged**, falling back
+    # to the best of the rest only when none did -- in which case ``converged`` comes
+    # out False and says so.
+    #
+    # This is the ordinary multi-start rule, not a retry-until-success loop: the grid is
+    # fixed, every start is run exactly once, and no failure is re-run in the hope of a
+    # better verdict. Ranking purely on the objective would let one abnormally
+    # terminated start displace an ordinary success that landed a hair behind it, and
+    # the fit would then be reported as failed on the strength of a start that was never
+    # the answer. That is what happened at the 2022-09-06 refit before this rule existed.
+    def _acceptable(result: optimize.OptimizeResult) -> bool:
+        candidate = GarchParams.from_array(result.x)
+        if innovation == "normal":
+            # nu is not a parameter here; validate it the same way the normal
+            # likelihood does, by ignoring whatever the optimiser left in that slot.
+            candidate = GarchParams(
+                mu=candidate.mu,
+                omega=candidate.omega,
+                alpha=candidate.alpha,
+                beta=candidate.beta,
+                nu=float("nan"),
+            )
+        return bool(result.success) and result.fun < _PENALTY and candidate.is_valid()
+
+    acceptable = [r for r in results if _acceptable(r)]
+    best = min(acceptable or results, key=lambda r: float(r.fun))
+
+    scaled_params = GarchParams.from_array(best.x)
+    params = GarchParams(
+        mu=scaled_params.mu / FIT_SCALE,
+        omega=scaled_params.omega / FIT_SCALE**2,
+        alpha=scaled_params.alpha,
+        beta=scaled_params.beta,
+        nu=scaled_params.nu if innovation == "t" else float("nan"),
+    )
+
+    # The likelihood of r differs from the likelihood of r * FIT_SCALE by the Jacobian
+    # of the change of variable, one factor of FIT_SCALE per observation. NaN when no
+    # start reached an admissible point at all, because the penalty value is not a
+    # log-likelihood and must not be reported as one.
+    hit_barrier = best.fun >= _PENALTY
+    loglik = (
+        float("nan")
+        if hit_barrier
+        else -float(best.fun) + values.size * np.log(FIT_SCALE)
+    )
+
+    # ``converged`` means the optimiser succeeded *and* landed somewhere admissible.
+    # Both halves matter: a "successful" termination on the stationarity barrier is not
+    # a fit, and reporting it as one is exactly the failure this field exists to
+    # prevent. The optimiser's own message is carried verbatim either way.
+    converged = bool(best.success) and params.is_valid() and not hit_barrier
+    message = str(best.message)
+    if bool(best.success) and not converged:
+        message = f"{message} [rejected: optimum is outside the admissible region]"
+
+    return FrequentistFit(
+        params=params,
+        loglik=loglik,
+        converged=converged,
+        message=message,
+        n_obs=int(values.size),
+    )
 
 
 def sample_garch_posterior(
@@ -329,22 +715,25 @@ def sample_garch_posterior(
 def plugin_predictive(
     params: GarchParams,
     h_next: float,
-    quantile_levels: np.ndarray,
-) -> tuple[float, np.ndarray]:
+) -> PredictiveDistribution:
     """Frequentist plug-in predictive for tomorrow's **return**.
 
     Conditions on the MLE as if it were the truth, so the predictive carries
     **innovation uncertainty only**. Closed form: a location-scale standardised
-    Student-t.
+    Student-t, or a normal when ``params.nu`` is NaN (the Stage 6 ablation).
 
-    Returns
-    -------
-    mean:
-        Predictive mean of the return (i.e. ``mu``).
-    quantiles:
-        Return quantiles at ``quantile_levels``, same shape.
+    Returns the distribution object rather than a ``(mean, quantiles)`` pair as this
+    module's stub once specified. The harness needs ``cdf`` for the PIT as well as
+    ``quantile`` for the interval bounds, and taking both from one object is what stops
+    the two from being computed under different conventions -- the same reason
+    ``NormalPredictive`` exists rather than a pair of free functions. Signature
+    deviation recorded in research_log.md.
     """
-    raise NotImplementedError("plugin_predictive")
+    if not np.isfinite(h_next) or h_next <= 0.0:
+        raise ValueError(f"h_next must be finite and positive, got {h_next!r}")
+    if np.isnan(params.nu):
+        return NormalPredictive(mean=params.mu, variance=float(h_next))
+    return StudentTPredictive(mean=params.mu, variance=float(h_next), nu=params.nu)
 
 
 def posterior_predictive(

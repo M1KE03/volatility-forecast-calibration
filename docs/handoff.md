@@ -1,7 +1,8 @@
 # Handoff: how to continue
 
-**State as of 2026-08-23.** Stage 1 complete. Two baselines forecast; no GARCH model
-exists. 127 tests pass.
+**State as of 2026-08-23.** Stage 2 complete. Both baselines and the frequentist
+GARCH(1,1)-t forecast over the full evaluation window, plus the GARCH-normal ablation.
+The Bayesian model does not exist. 188 tests pass.
 
 This document is written for whoever picks the project up next — including a future
 session of the same work. It assumes no memory of how anything got here.
@@ -24,9 +25,17 @@ pip install -r requirements.txt
 
 python run_all.py --stage data       # cached; no network unless --refresh
 python run_all.py --stage eda        # diagnostics + 4 figures
-python run_all.py --stage backtest   # baselines + acceptance figure
-pytest -q                            # expect 127 passed
+python run_all.py --stage backtest   # baselines + GARCH + 3 figures (~1 min)
+pytest -q                            # expect 188 passed (~10 min)
+pytest -m "not slow" -q              # inner loop, one backtest run (~1 min)
 ```
+
+`--stage backtest` refits GARCH 204 times, which is where its minute goes. The `slow`
+marker covers the 15 tests that each need their *own* backtest run -- the look-ahead
+audit's corrupted re-runs, and the determinism check. The contract tests share one
+module-scoped run, so `-m "not slow"` still pays for that one and takes about a minute.
+Plain `pytest` runs everything: the audit is on the never-cut list, and a default test
+run must not be the thing that skips it.
 
 **One prerequisite `pip` does not supply: a C/C++ compiler on `PATH`.** PyMC's PyTensor
 backend needs one. This machine uses MinGW-w64 GCC 16.2.0 (UCRT, x86_64) at
@@ -47,18 +56,20 @@ attempting Stage 3. Provenance and the verified SHA-256 are in `research_log.md`
 | Module | State |
 |---|---|
 | `src/data.py` | **Complete.** Download, SHA-256 manifest, returns, Parkinson proxy, VIX regimes, `PROXY_SCALE_C`. |
-| `src/eda.py` | **Complete.** ARCH-LM, Ljung-Box, ADF, ACF of squared returns. |
-| `src/figures.py` | **Partial.** House style + 5 figures (Stages 0-1). More added per stage. |
-| `src/backtest.py` | **Complete for baselines.** The loop, refit schedule, long-format output, persistence. |
-| `src/models.py` | **Half.** Interface + both baselines done. **Every GARCH function is a stub.** |
+| `src/eda.py` | **Complete.** ARCH-LM, Ljung-Box, ADF, ACF (`series_acf` and `squared_return_acf`). |
+| `src/figures.py` | **Partial.** House style + 7 figures (Stages 0-2). More added per stage. |
+| `src/backtest.py` | **Complete for the frequentist models.** The loop, both cadences, model registry, long-format output, persistence. |
+| `src/models.py` | **Frequentist half complete.** Interface, both baselines, the shared likelihood, MLE, plug-in predictive. **`log_prior`, `log_posterior`, `sample_garch_posterior` and `posterior_predictive` are stubs.** |
 | `src/evaluation.py` | **All stubs** (10 functions). |
 | `src/bootstrap.py` | **All stubs** (4 functions). |
 
 Artefacts in `data/processed/`: `analysis_frame.csv` (2,890 rows), `forecasts.csv`
-(4,268 rows = 2,134 dates × 2 models), `refit_records.csv` (102), `backtest_config.json`.
+(8,536 rows = 2,134 dates × 4 models), `refit_records.csv` (306 = 102 refits × 3 model
+tracks, carrying the parameter estimates and convergence verdicts),
+`backtest_config.json`.
 
-Tests: `test_data.py` 29, `test_eda.py` 22, `test_backtest.py` 20, `test_models.py` 17,
-`test_smoke.py` 5.
+Tests, as collected: `test_models.py` 68, `test_data.py` 39, `test_backtest.py` 32,
+`test_eda.py` 26, `test_smoke.py` 23 -- 188 in total.
 
 ---
 
@@ -88,71 +99,37 @@ decisions get new numbered subsections.
 
 ---
 
-## 4. Stage 2 — frequentist GARCH(1,1)-t
+## 4. Stage 2 — frequentist GARCH(1,1)-t — **done**
 
-*Governing plan estimate: 2-2.5h. This is the next thing to do.*
+*Kept short. The full record is `research_log.md` §1.9 and its Stage 2 changelog entry;
+what follows is only what Stage 3 needs to know.*
 
-### What to build
+`models.py` now holds the shared likelihood (`garch11_filter`, `garch11_t_loglik`), the
+MLE (`fit_garch_mle`), and the plug-in predictive (`StudentTPredictive`,
+`plugin_predictive`). `backtest.build_garch_paths` runs the two cadences: refit at each
+of the 102 refit dates, filter daily in between. All 102 refits converge for both the t
+and the normal variants; the look-ahead audit passes with them in the loop.
 
-In `src/models.py`, working bottom-up so each piece is testable before the next depends
-on it:
+Four things carry into Stage 3:
 
-1. `GarchParams.to_array` / `from_array` / `is_valid` — trivial, but `is_valid` encodes
-   the constraints (`omega > 0`, `alpha, beta >= 0`, `alpha + beta < 1`, `nu > 4`).
-2. `garch11_filter` — the recursion. Note it is the **residual** squared,
-   `(r[t-1] - mu)**2`, not the raw return squared.
-3. `garch11_t_loglik` — the standardised Student-t log-likelihood. **The `-0.5*ln(h_t)`
-   Jacobian term is the classic silent omission**: without it the likelihood still
-   optimises and still looks plausible, but every variance estimate is wrong.
-4. `backcast_initial_variance` — sample variance of the estimation window. Training data
-   only.
-5. `fit_garch_mle` — `scipy.optimize.minimize`, L-BFGS-B with bounds plus a stationarity
-   check, multi-start from a small fixed grid. **Return `converged` and the optimiser
-   message verbatim; never silently retry a failure into a success.**
-6. `plugin_predictive` — closed form. The scale factor `sqrt((nu-2)/nu)` converts a
-   standard t quantile to the standardised (unit-variance) t. **Dropping it inflates
-   every interval by a few percent, biasing the project's central comparison in the
-   Bayesian model's favour.**
+1. **The likelihood is validated.** Warm-up MLE gives alpha 0.2150, beta 0.7353, nu 5.86
+   against the PyMC probe's 0.219 / 0.713 / 6.4 on the same window. Two implementations
+   sharing no code. If your Stage 3 posterior sits somewhere else entirely, the sampler
+   or the model graph is wrong, not the data.
+2. **Returns are fitted on the percent scale internally** (D14), converted back before
+   they leave `fit_garch_mle`. The probe did the same for sampler geometry. Keep the
+   convention, and remember to convert variances back before they enter the forecast
+   table.
+3. **The frequentist interval widths are now on record.** They are what the Bayesian
+   intervals get compared against, and the sanity check in §5 depends on them: Bayesian
+   must come out **wider**.
+4. **Persistence is near the boundary.** `alpha + beta` exceeds 0.999 in 16 of the 102
+   refits, peaking at 0.99998. The probe's `beta = (1 - alpha) * delta` construction
+   enforces stationarity by construction, so the posterior will press against the same
+   edge. A prior that pushes back hard on it is making a modelling choice, and it should
+   be a visible one.
 
-Then extend `backtest.py`: add `"garch_mle"` to the model list and give the loop a real
-refit at each of the 102 refit dates, with daily filtering in between.
-
-### The two-cadence rule
-
-This is where the loop stops being trivial:
-
-- **Refit (every 21 days):** re-estimate parameters on the expanding window.
-- **Filter (every day):** parameters held fixed, but the variance recursion still advances
-  daily with each newly observed return.
-
-Freezing `h` between refits as well is a plausible-looking mistake that makes forecasts up
-to 21 days stale and is not a GARCH forecast at all. A test should assert `refit_id` is
-constant across a block while `variance` still changes day to day.
-
-### Also at this stage
-
-- Fit a **normal-innovation variant** too. It costs almost nothing now and is the Stage 6
-  ablation — normal vs t is the cheap, decisive lever on 99% tail coverage.
-- Residual diagnostics on the warm-up fit: Ljung-Box on standardised residuals and their
-  squares, QQ plot against the fitted t.
-- Parameter-stability plot across the 102 refits (nearly free, good diagnostic).
-
-### Tests that matter
-
-- **Recovery:** simulate 5,000 observations from known parameters with a fixed seed;
-  assert the MLE recovers them within a stated tolerance.
-- **Cross-check against `arch`:** fit the same series with `arch`'s GARCH(1,1)-t and
-  assert agreement to tight tolerance. This is the *only* use of `arch` in the project and
-  it must never produce a headline number.
-- `garch11_filter` matches a hand-computed 5-step recursion exactly.
-- As `nu -> large`, the t log-likelihood approaches the Gaussian one.
-- Returns `-inf` outside the constraint set — never raises, because the same function is
-  handed to both an optimiser and a sampler.
-
-### Done when
-
-GARCH forecasts complete over all 2,134 days, residual diagnostics recorded, the
-look-ahead audit **still passing** with the new model in the loop.
+**The next thing to do is §5.**
 
 ---
 
@@ -286,7 +263,10 @@ These were promised in the log and must be honoured, not rediscovered:
 | Report says proxy is *approximately unbiased on average* — **not** that proxy-robustness is restored | D10 | 7 |
 | Constant-mean simplification named as a limitation (raw-return Ljung-Box rejects out of sample) | §1.7 | 7 |
 | Priors frozen in the log **before** any Bayesian out-of-sample number | §5 above | 3 |
-| Normal-innovation GARCH variant fitted | plan §3 | 2, used at 6 |
+| ~~Normal-innovation GARCH variant fitted~~ **done at Stage 2** — full forecast table, key `garch_mle_normal` | plan §3, D15 | used at 6 |
+| `garch_mle_normal` kept out of the headline four-model tables (filter on `HEADLINE_MODELS`) | D15 | 4, 5 |
+| Near-boundary persistence (`alpha+beta` > 0.999 in 16 of 102 refits) noted rather than discovered late | §1.9 | 7 |
+| `BayesianFit`'s emcee fields re-keyed to NUTS before Stage 3 fills any of them | §1.9 | 3 |
 
 ---
 
@@ -300,6 +280,9 @@ Ordered by how much damage they do while looking fine.
 3. **Dropping `sqrt((nu-2)/nu)`** in the plug-in quantile. Inflates intervals a few
    percent, in the direction that flatters the Bayesian model.
 4. **Freezing `h` between refits** as well as the parameters. Not a GARCH forecast.
+   Guarded since Stage 2 by `test_variance_moves_daily_while_parameters_are_held_fixed`,
+   which asserts both halves: `refit_id` constant across a block, `variance` taking a
+   distinct value on every day of that same block.
 5. **Applying `c` twice**, or to a model already on the return scale. EWMA and GARCH are
    driven by squared returns and need no scaling; only the Parkinson-based RW does.
 6. **Weakening a look-ahead test until it passes.** Twice already the correct claim was
@@ -308,13 +291,18 @@ Ordered by how much damage they do while looking fine.
    code, then keep whichever version is actually true.
 7. **Positive-only tests.** Every diagnostic needs a case where it must *not* fire.
    Otherwise a function that always rejects passes the suite while fabricating a result.
+8. **Trimming the multi-start grid.** It looks like free speed — 51s against 2s — and all
+   grid sizes report 102/102 converged. With one start, 93 of the 102 refits land on a
+   *worse* local optimum. Measured, and recorded at `problems-and-solutions.md` #30.
+9. **Reading a fit's convergence verdict off the best objective value.** They are
+   different questions; entangling them cost 21 days of forecasts once already (#29).
 
 ---
 
 ## 9. Budget
 
-The governing plan budgets ~15-20h total. Stages 0 and 1 account for roughly 4-5h of that;
-Stages 2-7 are estimated at 15-19.5h. **The plan is already over its own budget**, which is
+The governing plan budgets ~15-20h total. Stages 0-2 account for roughly 7-8h of that;
+Stages 3-7 are estimated at 13-17h. **The plan is already over its own budget**, which is
 what the cut list in §5 of the plan exists for. Cut in its stated order — the SV stretch
 goal is already out, then the refit-cadence sensitivity, then the trailing-vol regime
 sensitivity, then MSE as a secondary loss. Never the four never-cut items in §3 above.
@@ -328,7 +316,7 @@ PyMC.
 ## 10. First three commands for the next session
 
 ```bash
-pytest -q                                  # confirm 127 pass before touching anything
+pytest -q                                  # confirm 188 pass before touching anything
 python run_all.py --stage backtest         # confirm artefacts regenerate
 sed -n '1,60p' docs/project1-implementation-plan.md   # re-read the contract
 ```

@@ -7,8 +7,9 @@ Companion to `research_log.md` and `README.md`.
 - This file is the **problem-oriented** view: every difficulty encountered so far, why it
   mattered, and the fix that is now in the repository.
 
-Scope: everything up to the end of **Stage 1** (backtest harness and baselines complete,
-2026-08-23). No GARCH model exists yet, so nothing here concerns model estimation.
+Scope: everything up to the end of **Stage 2** (frequentist GARCH complete,
+2026-08-23). The entries are grouped by the stage that produced them; nothing here yet
+concerns the Bayesian model or the evaluation layer.
 
 A note on what is included. Several entries are mistakes made during this work rather
 than external obstacles — a plan followed too long, a premise never tested, a test that
@@ -496,6 +497,186 @@ would have flagged that — the forecasts would simply have scored suspiciously 
 
 ---
 
+# Stage 2 (frequentist GARCH)
+
+Added 2026-08-23, when `models.py` acquired a model that estimates something. The
+numbering continues the table above.
+
+| # | Problem | Fix | Enforced by |
+|---|---|---|---|
+| **Estimation** | | | |
+| 29 | Multi-start ranked on objective value alone blanked 21 days of forecasts | Rank converged optima first | `test_mle_prefers_a_converged_start...` |
+| 30 | A small multi-start grid finds a worse optimum a third of the time | Keep the 18-point grid; measured, not assumed | Log §1.9 |
+| 31 | `omega ~ 5e-6` sits below the optimiser's convergence tolerance | Fit on percent returns, convert back (D14) | `test_loglik_is_scale_equivariant` |
+| 32 | `nu` has no meaning in the normal variant but still occupies a slot | Overwritten with NaN before validation | `test_normal_loglik_ignores_nu_entirely` |
+| **Test design** | | | |
+| 33 | A "degenerate data" test conflated two different failures | Split: unusable input raises, unfittable input reports | Two tests, one each |
+| 34 | Forcing a failed refit with `refit_every=1` meant 2,134 fits | Force the failure at the locked cadence instead | Runtime: 18 min to 1 |
+| 35 | The suite went from 8 seconds to 10 minutes | `slow` marker + module-scoped run fixture | `pytest -m "not slow"`, 1 min |
+| **Presentation** | | | |
+| 36 | Stress labels printed through the legend | Labels on the bottom panel, legend on the top | Visual check |
+
+---
+
+## Estimation
+
+### 29. Ranking multi-starts on objective value alone lost 21 days of forecasts
+
+**Problem.** `fit_garch_mle` runs 18 fixed starting points and returns the best. The
+first implementation took the best by objective value and reported that start's
+convergence verdict. At the 2022-09-06 refit, one start terminated abnormally
+(`ABNORMAL:` — L-BFGS-B's line-search failure) at an objective a hair below an ordinary
+success, so it won the ranking and the whole refit was reported as failed.
+
+**Why it mattered.** Under decision D16 a failed refit produces no forecasts for its
+block, so this blanked 21 days of the headline model — 1% of the evaluation window — on
+the strength of a starting point that was never the answer. It was visible only because
+`run_all.py` prints the convergence count; the forecast table would otherwise have had a
+hole in it that nothing announced until the evaluation layer met a NaN.
+
+The general shape is worth more than the instance: a selection rule and a reporting rule
+were entangled. The optimum and the verdict about it were being read off the same object
+without asking whether that object was admissible first.
+
+**Solution.** Rank the acceptable starts — converged, admissible, not on the barrier —
+and take the best of those; fall back to the best of the rest only if none qualify, in
+which case `converged` is False and says so. This is the ordinary multi-start rule and
+not a retry loop: the grid is fixed, every start runs exactly once, and no failure is
+re-run in the hope of a better verdict. All 102 refits now converge for both variants.
+
+### 30. The obvious optimisation would have changed a third of the estimates
+
+**Problem.** The 18-point grid costs 51 seconds across the backtest; a single start
+costs 2. That is a tempting saving, and "the optimiser converges either way" is the
+argument that would justify it — all four grid sizes tried reported 102/102 converged.
+
+**Why it mattered.** Convergence says the optimiser stopped at a local optimum, not that
+it stopped at the right one. Refitting all 102 windows under reduced grids: with one
+start, **93 of 102** land on a different optimum (alpha moving by up to 0.049, nu by up
+to 1.6); with six starts, 40 of 102 move. Since the reduced grids are subsets of the
+full one, every difference is a *worse* optimum. The likelihood has multiple local maxima
+on this data.
+
+Nothing would have failed. The parameter-stability figure would have looked much the
+same, the forecasts would have been plausible, and roughly a third of the project's
+published estimates would have been wrong.
+
+**Solution.** Keep the grid. The measurement is recorded in the log (§1.9) so the next
+person to notice the 51 seconds finds the answer rather than repeating the experiment.
+
+### 31. The natural scale for the data is the wrong scale for the optimiser
+
+**Problem.** Daily SPY log returns have a standard deviation near 0.011, so `omega`
+lands around 5e-6 — below L-BFGS-B's default convergence tolerances. The optimiser
+terminates on a parameter it has barely moved.
+
+**Why it mattered.** Not a crash and not obviously wrong: it returns estimates, reports
+success, and produces forecasts. It simply stops early on the one parameter that sets
+the unconditional variance level.
+
+**Solution.** Decision D14: fit on `returns * 100`, convert the estimates back. Contained
+entirely inside `fit_garch_mle`, so no other module sees the percent convention, and it
+matches what the Stage 3 probe already found about the sampler's geometry. The rescaling
+is a change of variable, so the two log-likelihoods must differ by exactly one factor of
+100 per observation — asserted rather than assumed.
+
+### 32. `nu` had no meaning in the normal variant but still occupied a slot
+
+**Problem.** Both innovation distributions share `garch11_filter` and the five-element
+parameter vector, but the Gaussian model has no degrees-of-freedom parameter. Whatever
+sits in `theta[4]` is meaningless — and `is_valid` was still checking `nu > 4` against it.
+
+**Why it mattered.** Two ways to go wrong in opposite directions. A value that passes
+validation makes the normal variant's admissibility depend on a number that means
+nothing; a value that fails it makes every normal fit report as inadmissible. The first
+implementation hit the second: with `nu` bounded at exactly 4.0, `nu > 4` was false and
+no normal fit could ever be accepted.
+
+**Solution.** `garch11_normal_loglik` overwrites `nu` with NaN before validating, so the
+value passed in genuinely cannot affect the result, and `is_valid` treats NaN as "this
+variant has no such parameter". Fits return `nu = NaN` rather than a sentinel: anything
+downstream that forgets to branch on the innovation distribution produces a NaN, which is
+visible, rather than a plausible number computed under the wrong distribution.
+
+---
+
+## Test design
+
+### 33. One test was asking two different questions
+
+**Problem.** `test_mle_reports_failure_rather_than_inventing_a_fit` fed the optimiser
+`np.zeros(200)` and expected `converged=False`. It got a `ValueError` from
+`backcast_initial_variance` instead, because a constant series has zero variance and
+cannot seed the recursion at all.
+
+**Why it mattered.** The tempting fix is to wrap the backcast so the function returns a
+failed fit instead of raising. That would be wrong: "the optimiser did not converge" and
+"this input cannot be fitted by any procedure" are different facts, and collapsing them
+loses the distinction the `converged` flag exists to carry.
+
+**Solution.** Two tests. Structurally unusable input raises — the same principle as
+`EstimationWindow.ROLLING` raising rather than silently doing something nobody chose.
+Well-formed input the optimiser cannot handle (a series with variance 1e-24, so the
+likelihood surface is flat to machine precision) returns `converged=False` with the
+optimiser's message intact.
+
+### 34. The forced-failure test asked for 2,134 refits
+
+**Problem.** The test that forces one refit to fail used `BacktestConfig(refit_every=1)`
+to make the target date easy to identify. At the locked cadence that is 102 fits; at a
+cadence of 1 it is 2,134, so a test intended to check error handling ran for eighteen
+minutes.
+
+**Why it mattered.** More than slowness. A test that runs the loop at a cadence the
+project never uses is testing a configuration nobody will ship, and the block structure
+it exercises — one date per block — is precisely the structure where the two-cadence bug
+cannot appear.
+
+**Solution.** Force the failure at the locked cadence by identifying the target refit
+through its estimation-window length, which is unique because the window expands. The
+test now also asserts the whole 21-day block is empty and that neighbouring blocks are
+untouched, which is what "contained, not contagious" actually means.
+
+### 35. The suite went from eight seconds to ten minutes
+
+**Problem.** A full backtest now costs about a minute. The look-ahead audit runs it once
+uncorrupted and once per corruption date, and the corrupted runs are *slower* than clean
+ones because random noise makes the optimiser work harder.
+
+**Why it mattered.** A suite nobody runs is a suite that does not protect anything, and
+the audit at the centre of it is on the governing plan's never-cut list. The wrong fix
+is to shrink the audit — run it on a truncated sample, or drop GARCH from it — which
+buys speed by removing the coverage that motivated the test.
+
+**Solution.** Two changes, neither of which reduces coverage. The uncorrupted run became
+a module-scoped fixture instead of being recomputed in each test that needed it. The 15
+tests that each need their *own* run — the audit's three corrupted re-runs, the vacuity
+check beside them, the determinism test — are marked `slow`.
+
+`pytest` takes 10 minutes; `pytest -m "not slow"` takes 1. Worth being precise about why
+the second number is a minute and not seconds: the contract tests share that fixture, so
+the inner loop still pays for one full backtest. Marking them slow as well would buy the
+seconds back by skipping the checks that the forecast table is complete and its intervals
+correctly ordered, which is not a trade worth making. Plain `pytest` runs the marked
+tests too — a default test run must not be the thing that skips the audit.
+
+---
+
+## Presentation
+
+### 36. The stress labels printed through the legend
+
+**Problem.** `plot_parameter_stability` puts a legend in its top panel and calls
+`shade_stress_periods`, which anchors its labels to the top of whichever axes it is
+given. On the top panel the two occupy the same space.
+
+**Solution.** Labels on the bottom panel, where the `nu` series sits well below the top
+of the axes; legend on the top panel. The third variation on #27 — annotations anchored
+to a fixed corner will eventually collide with whatever else lives there, and the fix is
+always to move one of them somewhere with known headroom.
+
+---
+
 ## Still open
 
 Carried forward deliberately, not overlooked:
@@ -504,6 +685,16 @@ Carried forward deliberately, not overlooked:
   report; robustness check owed at Stage 6.
 - **Constant mean over the evaluation period** (#10). Limitations section.
 - **Priors for the Bayesian GARCH.** Must be frozen in `research_log.md` *before* any
-  out-of-sample number is computed. Stage 3.
-- **The refit machinery has never been exercised.** Both baselines are parameter-free, so
-  the 21-day cadence is a no-op so far. Stage 2 is the first real test of it.
+  out-of-sample number is computed. Stage 3, and still the largest open obligation.
+- **`BayesianFit` still carries emcee fields.** `acceptance_fraction` and
+  `autocorr_time` were superseded by B1-R's switch to NUTS. `BacktestConfig` and
+  `RefitRecord` were re-keyed at Stage 1 (#18); this dataclass was not, because Stage 2
+  does not touch it. Stage 3 must, before it fills any of them in.
+- **Persistence near the stationarity boundary.** `alpha + beta` reaches 0.99998 and
+  exceeds 0.999 in 16 of the 102 refits (log §1.9). Admissible throughout, but the
+  Bayesian model enforces the same constraint by construction, so the posterior will
+  press against the same edge. Worth a sentence in the report rather than a discovery
+  at Stage 7.
+- **Fitted tails slightly fatter than the residuals warrant.** The warm-up QQ plot puts
+  the empirical standardised residuals inside the fitted t at both ends. Whether that
+  turns into over-coverage at 99% is a Stage 4 question and is left to Stage 4.

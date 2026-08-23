@@ -293,16 +293,15 @@ def adf_test(returns: pd.Series) -> TestResult:
     )
 
 
-def squared_return_acf(returns: pd.Series, nlags: int = ACF_LAGS) -> pd.DataFrame:
-    """ACF of squared returns with 95% confidence bounds.
+def series_acf(series: pd.Series, nlags: int = ACF_LAGS) -> pd.DataFrame:
+    """ACF of a series as given, with 95% confidence bounds.
 
-    Returns a frame indexed by lag ``1..nlags`` -- lag 0 is dropped because its value is
-    identically 1 and plotting it compresses the axis so that the real decay, which is
-    the whole point of the figure, becomes hard to read.
+    The general form of ``squared_return_acf``, which squares its input first. Stage 2
+    needs both: the ACF of standardised residuals tests the mean equation, the ACF of
+    their squares tests the variance equation, and they are different claims.
     """
-    clean = _as_clean_array(returns)
-    squared = (clean - clean.mean()) ** 2
-    values, confint = acf(squared, nlags=nlags, alpha=0.05, fft=True)
+    clean = _as_clean_array(series)
+    values, confint = acf(clean, nlags=nlags, alpha=0.05, fft=True)
     frame = pd.DataFrame(
         {
             "acf": values,
@@ -312,6 +311,18 @@ def squared_return_acf(returns: pd.Series, nlags: int = ACF_LAGS) -> pd.DataFram
         index=pd.RangeIndex(0, nlags + 1, name="lag"),
     )
     return frame.iloc[1:]
+
+
+def squared_return_acf(returns: pd.Series, nlags: int = ACF_LAGS) -> pd.DataFrame:
+    """ACF of squared returns with 95% confidence bounds.
+
+    Returns a frame indexed by lag ``1..nlags`` -- lag 0 is dropped because its value is
+    identically 1 and plotting it compresses the axis so that the real decay, which is
+    the whole point of the figure, becomes hard to read.
+    """
+    clean = _as_clean_array(returns)
+    squared = pd.Series((clean - clean.mean()) ** 2)
+    return series_acf(squared, nlags)
 
 
 def run_eda(returns: pd.Series, *, window_label: str) -> EDAReport:

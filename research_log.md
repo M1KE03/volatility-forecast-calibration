@@ -385,6 +385,107 @@ variance, never in how they turn a variance into an interval.
 the archived plan's stub docstring specified a wide schema. Long wins: every downstream
 consumer groups by model or by regime.
 
+### 1.9 Decided at Stage 2 (2026-08-23)
+
+**D14 -- The MLE is maximised on percent returns and converted back.**
+`fit_garch_mle` multiplies its input by `FIT_SCALE = 100`, optimises, and converts the
+estimates to the raw return scale before returning them. Nothing outside that function
+sees the percent convention: `GarchParams`, `FrequentistFit.loglik`, the forecast table
+and every figure are on the raw log-return scale throughout.
+
+Daily SPY log returns have a standard deviation near 0.011, which puts `omega` at around
+5e-6 -- below L-BFGS-B's default convergence tolerances, so the optimiser stops on a
+parameter it has barely moved. On the percent scale `omega` is around 0.05 and the five
+parameters sit within two orders of magnitude of each other. The Stage 3 feasibility
+probe (1.6) found the same thing about the sampler's geometry and scaled to percent for
+the same reason, so this keeps the two stages on one convention.
+
+The rescaling is a change of variable, not a change of model: the two log-likelihoods
+differ by exactly one factor of `FIT_SCALE` per observation, and
+`test_loglik_is_scale_equivariant` asserts that identity rather than trusting it.
+
+**D15 -- The normal-innovation variant runs through the full backtest as
+`garch_mle_normal`.**
+The governing plan owes a GARCH-normal versus GARCH-t comparison at 99% coverage at
+Stage 6. Fitting it now costs one extra optimisation per refit -- 5 seconds across the
+whole backtest against 51 for the t variant -- and saves re-entering the walk-forward
+loop later, so it produces a complete forecast table over all 2,134 evaluation days.
+
+It is an **ablation, not a competitor**. `backtest.HEADLINE_MODELS` excludes it, and the
+evaluation layer must filter on that tuple rather than on whatever models happen to be
+present in `forecasts.csv`. The lineup locked in 1.1 is four forecasters and this is not
+a fifth.
+
+`nu` is `NaN` for this variant rather than a sentinel value. Anything downstream that
+forgets to branch on the innovation distribution therefore produces a NaN, which is
+visible, instead of a plausible number computed under the wrong distribution.
+
+**D16 -- A refit that does not converge produces no forecasts for its block.**
+The 21 days served by a failed fit stay NaN in the forecast table and the failure is
+written into its `RefitRecord` with the optimiser's message verbatim.
+
+The alternative -- carrying the previous window's parameters forward -- was rejected. It
+would hide a failed fit behind numbers that look entirely ordinary, and it is exactly
+what `FrequentistFit.converged` exists to prevent. A gap in the forecast table is loud,
+survives into the evaluation layer, and is a fact about the model rather than about the
+reporting. `run_all.py --stage backtest` prints a `!!` line for any such refit.
+
+As implemented, all 102 refits converge for both variants, so no gap exists in the
+current run. `test_every_refit_converged` asserts that state and
+`test_a_failed_refit_produces_no_forecasts_rather_than_stale_ones` forces a failure to
+check the handling, because behaviour under failure should not depend on whether the
+real data happens to trigger one.
+
+**Multi-start ranks converged optima first.** `fit_garch_mle` runs a fixed 18-point
+grid and takes the best objective value **among the starts that converged**, falling
+back to the best of the rest only if none did -- in which case `converged` is False and
+says so. Ranking purely on the objective value is what the first implementation did, and
+it cost the 2022-09-06 refit: one abnormally terminated start had an objective a hair
+below an ordinary success, displaced it, and blanked 21 days of the headline model's
+forecasts. The grid is fixed and every start runs exactly once; no failure is re-run in
+the hope of a better verdict.
+
+**The size of that grid is load-bearing, and was measured rather than assumed.** The
+18-point grid costs 51 seconds across the backtest against 2 seconds for a single start,
+which is the kind of gap that invites trimming. Refitting all 102 windows under reduced
+grids says otherwise: with one start per refit, 93 of the 102 land on a *different*
+optimum, alpha moving by up to 0.049 and nu by up to 1.6; with six starts, 40 of 102 move
+and alpha by up to 0.011. Since the reduced grids are subsets, every one of those
+differences is a worse optimum. The likelihood has multiple local maxima on this data and
+a small grid finds the wrong one about a third of the time, silently. The full grid
+stays.
+
+**Signature deviation: `plugin_predictive` returns a distribution object.**
+The Stage 1 stub documented `plugin_predictive(params, h_next, quantile_levels) ->
+(mean, quantiles)`. It now returns a `PredictiveDistribution` -- a `StudentTPredictive`,
+or a `NormalPredictive` when `nu` is NaN. The harness needs `cdf` for the PIT as well as
+`quantile` for the interval bounds, and taking both from one object is what stops them
+being computed under different conventions. Same reasoning as `NormalPredictive`
+existing at Stage 1 rather than a pair of free functions. Flagged here rather than
+changed silently, following the precedent at 1.4.
+
+**Schema change: `RefitRecord` gains `model` and the five parameter fields.**
+One record per (refit, model): the baselines contribute one row per refit recording the
+estimation window, each GARCH model one row per refit carrying `mu, omega, alpha, beta,
+nu`, its log-likelihood and its convergence verdict. `refit_records.csv` is therefore
+both the diagnostics log and the parameter audit trail, and
+`figures.plot_parameter_stability` reads it directly so the plotted estimates and the
+recorded ones cannot drift apart. A separate `garch_params.csv` was considered and
+dropped: two artefacts carrying the same numbers is one more thing that can disagree.
+
+Consequence for tests: the number of refits is now the number of distinct `refit_id`
+values, not `len(records)`.
+
+**Observed, not decided: persistence sits close to the stationarity boundary.**
+`alpha + beta` for the t variant runs from 0.950 at the warm-up fit to 0.99998 at its
+highest, and is at or above 0.999 in 16 of the 102 refits. Every fit is admissible and
+converged, so nothing here is invalid, but the constraint is very nearly binding over
+the later sample -- near-IGARCH behaviour, which is what a long daily equity sample
+containing 2020 and 2022 tends to produce. Recorded now because it bears on Stage 3:
+the probe's `beta = (1 - alpha) * delta` construction enforces `alpha + beta < 1` by
+construction, so the posterior will press against the same boundary, and a prior that
+pushes back hard on it would be making a modelling choice that should be visible rather
+than incidental.
 ---
 
 ## 2. Changelog
@@ -696,3 +797,88 @@ and move only after the large returns arrive. Had the recursion been reading the
 day's return, the EWMA line would sit on top of the realised peak instead of trailing it.
 
 Next: Stage 2, frequentist GARCH(1,1)-t, which joins this loop without the loop changing.
+
+### Stage 2 -- frequentist GARCH(1,1)-t (2026-08-23)
+
+The first model in this project that estimates anything, and therefore the first real
+exercise of the refit machinery built at Stage 1. **The look-ahead audit still passes
+with both GARCH models in the loop**, which is the condition the governing plan sets for
+proceeding.
+
+New: the GARCH half of src/models.py implemented (was stubs) -- GarchParams methods,
+garch11_filter, garch11_t_loglik, garch11_normal_loglik, backcast_initial_variance,
+standardised_residuals, fit_garch_mle, StudentTPredictive, plugin_predictive;
+backtest.build_garch_paths and the model registry; RefitRecord extended;
+eda.series_acf factored out of eda.squared_return_acf;
+figures.plot_garch_residual_diagnostics and figures.plot_parameter_stability;
+run_all.py --stage backtest extended; pytest.ini added to register the `slow` marker.
+**Tests: 188 pass** (test_models.py 68, up from 17; test_backtest.py 32, up from 22;
+unchanged elsewhere).
+
+Still stubbed and belonging to Stage 3: log_prior, log_posterior,
+sample_garch_posterior, posterior_predictive, and all of evaluation.py and bootstrap.py.
+
+**Output.** Four forecast tracks, 2,134 rows each, no gaps in any forecast or PIT
+column. 102 refits per GARCH variant, all converged. Mean annualised volatility: 17.71%
+(RW), 18.86% (EWMA), 19.37% (GARCH-t), 18.54% (GARCH-normal). Fitting cost 51s for the t
+variant and 5s for the normal one, so a full backtest run is about a minute.
+
+**The warm-up fit sanity-checks the likelihood against an independent estimate.**
+On the 756-observation warm-up window: mu 0.000704, omega 4.81e-6, alpha 0.2150, beta
+0.7353, alpha+beta 0.9503, nu 5.86. The Stage 3 PyMC probe (1.6) fitted the same window
+under priors and got alpha 0.219, beta 0.713, nu 6.4. Two implementations that share no
+code -- a hand-written NumPy likelihood maximised by L-BFGS-B, and a pytensor.scan graph
+sampled by NUTS -- agreeing to that tolerance is stronger evidence that the likelihood is
+right than any single number either produced.
+
+**Residual diagnostics on the warm-up fit.** Ljung-Box on standardised residuals gives
+p = 0.50 / 0.57 / 0.29 at 5 / 10 / 22 lags; on their squares, p = 0.62 / 0.88 / 0.98.
+The second row is the one that matters: the same test on raw squared returns rejected at
+p = 3.4e-44 (1.7), so the variance equation has absorbed the clustering it was fitted to
+absorb. The first row says the constant mean is adequate in sample, which is consistent
+with the raw-return Ljung-Box at 1.7 and does not disturb the limitation recorded there
+about the evaluation period.
+
+The QQ plot (figures/06) shows the empirical residuals with *thinner* tails than the
+fitted t at both ends. Not a defect -- the MLE trades tail fit against the centre across
+the whole distribution -- but it is the direction that matters for this project, since a
+predictive whose tails are fatter than the data warrants will over-cover at 99%. Whether
+it does is a Stage 4 question and is left to Stage 4.
+
+**Parameter stability** (figures/07). alpha jumps at COVID and decays afterwards; beta
+rises steadily as the expanding window lengthens; nu falls from 5.9 to about 4.65 by
+late 2017 and climbs back above 5.8 by 2024. Persistence is discussed at 1.9.
+
+**The two-cadence rule is now load-bearing.** Parameters are re-estimated at each of the
+102 refit dates on the expanding window; between refits they are held fixed while
+garch11_filter keeps advancing the variance recursion daily. Because h[t] is defined as
+the conditional variance of returns[t] given information through t-1, the daily update
+falls out of the indexing rather than needing a second loop.
+test_variance_moves_daily_while_parameters_are_held_fixed asserts both halves -- refit_id
+and the predictive mean constant across a block, variance taking 21 distinct values
+within that same block. Freezing h between refits as well would have produced a
+complete, plausible forecast table built on variances up to 21 days stale.
+
+**Compiled inner loop.** The variance recursion is numba-compiled (B1 always specified
+this). The multi-start MLE evaluates it on the order of 1e6 times across the backtest;
+in pure Python that is tens of minutes, compiled it is under a minute.
+
+**Test-suite cost and the `slow` marker.** A full run now takes about a minute, and the
+look-ahead audit needs several of them. Two changes, neither of which reduces coverage:
+the uncorrupted run became a module-scoped fixture instead of being recomputed in each
+test that needs it, and the 15 tests that each require their *own* run -- the audit's
+three corrupted re-runs, the vacuity check, the determinism test -- are marked `slow`.
+`pytest` takes 10 minutes and runs everything; `pytest -m "not slow"` takes 1 minute,
+which is the shared fixture's own cost rather than seconds. The marker is a convenience
+for development and never what a default run applies: the audit is on the never-cut
+list.
+
+**What the audit now covers that it could not before.** Until this stage both models
+were parameter-free, so the master test could not have caught a refit that estimated on
+data it should not have seen -- there was no estimation to catch. Every route by which
+the future could reach a forecast is now inside its scope: the estimation window
+(estimation_slice ends strictly before the refit date), the backcast seed (h0 from the
+estimation window alone), and the daily filter.
+
+Next: Stage 3, Bayesian GARCH(1,1)-t. D4 -- the priors -- is still open and must be
+frozen in this log before any Bayesian out-of-sample number is computed.
