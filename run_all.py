@@ -6,12 +6,19 @@ Usage
     python run_all.py --stage data
     python run_all.py --all
 
-``data``, ``eda`` and ``backtest`` are implemented (Stages 0-2). ``evaluate`` and
-``figures`` are still stubs and raise ``NotImplementedError``: their interfaces exist so
-they can be reviewed before any implementation is written.
+``data``, ``eda``, ``backtest`` and ``bayes`` are implemented (Stages 0-3).
+``evaluate`` and ``figures`` are still stubs and raise ``NotImplementedError``: their
+interfaces exist so they can be reviewed before any implementation is written.
 
 Stages run in the order listed and each depends on its predecessor's artefacts in
 ``data/processed/``.
+
+``backtest`` and ``bayes`` are two halves of one walk-forward run, split because the
+frequentist half takes a minute and the Bayesian half takes about ninety-five. Each
+writes its own partial tables and rebuilds the merged ``forecasts.csv`` from whichever
+partials are on disk, so re-running the cheap half never re-runs the expensive one, and
+the evaluation layer still reads one table. ``--all`` runs both, and therefore takes
+about an hour and a half.
 """
 
 from __future__ import annotations
@@ -25,7 +32,7 @@ RAW_DIR = PROJECT_ROOT / "data" / "raw"
 PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 FIGURES_DIR = PROJECT_ROOT / "figures"
 
-STAGE_ORDER: tuple[str, ...] = ("data", "eda", "backtest", "evaluate", "figures")
+STAGE_ORDER: tuple[str, ...] = ("data", "eda", "backtest", "bayes", "evaluate", "figures")
 
 STAGE_HELP: dict[str, str] = {
     "data": "Download or load cached SPY and ^VIX bars, verify hashes, build the "
@@ -35,7 +42,11 @@ STAGE_HELP: dict[str, str] = {
            "Stage 0 figures.",
     "backtest": "Walk forward through the out-of-sample period, refitting every 21 "
                 "trading days and filtering daily in between, producing forecasts and "
-                "predictive intervals for every model built so far.",
+                "predictive intervals for the baselines and the maximum-likelihood "
+                "GARCH models. About a minute.",
+    "bayes": "The same walk-forward run for the Bayesian GARCH(1,1)-t: 102 NUTS fits, "
+             "each carrying its whole posterior into the predictive rather than its "
+             "maximum. About 95 minutes; results merge into the same forecast table.",
     "evaluate": "Compute QLIKE and variance MSE, interval coverage, VaR backtests, "
                 "Diebold-Mariano comparisons, and block-bootstrap intervals.",
     "figures": "Render the figures used in report/report.md.",
@@ -162,7 +173,8 @@ def stage_backtest(args: argparse.Namespace) -> None:
 
     Stage 1 produced the two baselines; Stage 2 added the frequentist GARCH(1,1)-t and
     its normal-innovation ablation, which join the same loop without the loop changing.
-    The Bayesian model joins at Stage 3 the same way.
+    The Bayesian model joined at Stage 3 the same way, and runs from ``--stage bayes``
+    for cost reasons alone -- see this module's docstring.
 
     Takes about a minute: 204 maximum-likelihood fits, 102 per GARCH variant.
     """
@@ -183,13 +195,13 @@ def stage_backtest(args: argparse.Namespace) -> None:
 
     config = B.BacktestConfig(mcmc_seed=args.seed)
     print(f"proxy scale c = {config.proxy_scale_c:.6f}  (frozen, warm-up only)")
-    forecasts, records = B.run_backtest(frame, config)
+    forecasts, records = B.run_backtest(frame, config, models=B.FREQUENTIST_MODELS)
     record_frame = pd.DataFrame([asdict(r) for r in records])
 
     n_refits = record_frame["refit_id"].nunique()
-    print(f"models    : {', '.join(B.MODELS)}")
+    print(f"models    : {', '.join(B.FREQUENTIST_MODELS)}")
     print(f"refits    : {n_refits} at a {config.refit_every}-day cadence")
-    for model in B.MODELS:
+    for model in B.FREQUENTIST_MODELS:
         sub = forecasts[forecasts.model == model]
         ann = (sub["variance"].mean() * 252) ** 0.5
         print(
@@ -204,7 +216,7 @@ def stage_backtest(args: argparse.Namespace) -> None:
     print()
     for model in B.GARCH_MODELS:
         fits = record_frame[record_frame["model"] == model]
-        failed = fits[~fits["mle_converged"]]
+        failed = fits[~fits["converged"]]
         print(
             f"  {model:<18} {len(fits) - len(failed)}/{len(fits)} refits converged, "
             f"{fits['seconds_elapsed'].sum():.1f}s total"
@@ -212,10 +224,10 @@ def stage_backtest(args: argparse.Namespace) -> None:
         for _, bad in failed.iterrows():
             print(
                 f"    !! {bad['refit_date'].date()} did NOT converge: "
-                f"{bad['mle_message']}  ({config.refit_every} days have no forecast)"
+                f"{bad['message']}  ({config.refit_every} days have no forecast)"
             )
 
-    written = B.save_forecasts(forecasts, records, config, PROCESSED_DIR)
+    written = B.save_track("frequentist", forecasts, records, config, PROCESSED_DIR)
     for path in written:
         print(f"wrote {path}")
 
@@ -271,6 +283,77 @@ def stage_backtest(args: argparse.Namespace) -> None:
         print(f"wrote {path}")
 
 
+def stage_bayes(args: argparse.Namespace) -> None:
+    """Run the Bayesian half of the walk-forward backtest and merge its forecasts.
+
+    **About 95 minutes**, and that is the honest cost of the thing the project is named
+    after: 102 NUTS fits at 4 chains x (1,000 tune + 1,000 draw), on windows growing from
+    756 observations to 2,877. It is a separate stage from ``backtest`` for that reason
+    alone -- both halves are the same loop, run over the same refit dates, under the same
+    config.
+
+    A refit that fails its convergence diagnostics produces no forecasts for the 21 days
+    it serves (decision D19), and those days stay NaN in the forecast table. That is
+    reported here rather than filtered out: a Bayesian model that cannot be sampled on
+    some windows is a finding about the model, and the evaluation layer has to see the
+    gap to say so.
+    """
+    from dataclasses import asdict
+
+    import pandas as pd
+
+    from src import backtest as B
+
+    frame_path = PROCESSED_DIR / "analysis_frame.csv"
+    if not frame_path.exists():
+        raise SystemExit(
+            f"{frame_path} not found. Run `python run_all.py --stage data` first."
+        )
+    frame = pd.read_csv(frame_path, index_col=0, parse_dates=True)
+
+    config = B.BacktestConfig(mcmc_seed=args.seed)
+    print(
+        f"sampler   : {config.chains} chains x ({config.tune} tune + {config.draws} "
+        f"draw), target_accept {config.target_accept}, thinned by {config.thin}"
+    )
+    print(f"seed      : {config.mcmc_seed} (+ refit index, so no two refits share a chain)")
+    print("this stage takes about 95 minutes", flush=True)
+
+    forecasts, records = B.run_backtest(frame, config, models=B.BAYES_MODELS)
+    record_frame = pd.DataFrame([asdict(r) for r in records])
+
+    sub = forecasts[forecasts.model == B.BAYES_MODEL]
+    ann = (sub["variance"].mean() * 252) ** 0.5
+    print()
+    print(
+        f"  {B.BAYES_MODEL:<18} {len(sub):,} rows, "
+        f"{sub['variance'].notna().sum():,} finite, "
+        f"mean annualised vol {ann:.2%}"
+    )
+
+    failed = record_frame[~record_frame["converged"]]
+    print(
+        f"  refits    : {len(record_frame) - len(failed)}/{len(record_frame)} converged, "
+        f"{record_frame['seconds_elapsed'].sum() / 60:.1f} min sampling"
+    )
+    print(
+        f"  worst R-hat {record_frame['max_r_hat'].max():.4f}, "
+        f"min ess_bulk {record_frame['min_ess_bulk'].min():.0f}, "
+        f"min ess_tail {record_frame['min_ess_tail'].min():.0f}, "
+        f"{int(record_frame['n_divergences'].sum())} divergences in total"
+    )
+    for _, bad in failed.iterrows():
+        print(
+            f"    !! {bad['refit_date'].date()} did NOT converge: {bad['message']}  "
+            f"({config.refit_every} days have no forecast)"
+        )
+
+    written = B.save_track("bayes", forecasts, records, config, PROCESSED_DIR)
+    print()
+    for path in written:
+        print(f"wrote {path}")
+
+
 def stage_evaluate(args: argparse.Namespace) -> None:
     """Score the forecasts and persist the evaluation tables."""
     raise NotImplementedError("stage 'evaluate' not implemented")
@@ -285,6 +368,7 @@ STAGES = {
     "data": stage_data,
     "eda": stage_eda,
     "backtest": stage_backtest,
+    "bayes": stage_bayes,
     "evaluate": stage_evaluate,
     "figures": stage_figures,
 }
@@ -323,9 +407,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--seed",
         type=int,
         default=0,
-        help="Seed for the MCMC sampler. The bootstrap seed is fixed separately in "
-             "src/bootstrap.py so evaluation intervals stay reproducible "
-             "independently of the sampler. (default: %(default)s)",
+        help="Base seed for the MCMC sampler; each refit samples under this seed "
+             "plus its own index, so no two refits share a chain's randomness. The "
+             "bootstrap seed is fixed separately in src/bootstrap.py so evaluation "
+             "intervals stay reproducible independently of the sampler. "
+             "(default: %(default)s)",
     )
     return parser
 

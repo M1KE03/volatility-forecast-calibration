@@ -706,6 +706,156 @@ Before concluding that something is expensive, confirm it has started.
 
 ---
 
+## Inference
+
+### 38. The sanity check I was handed would have sent me hunting a bug that was not there
+
+**Problem.** The Stage 3 handoff states the check plainly: "Bayesian intervals should be
+**≥ frequentist widths**, most visibly early in the sample and at the 99% level. If they
+are not, hunt for a bug." Written as a test over 90%, 95% and 99%, that failed
+immediately at 90% -- the mixture predictive came out *narrower* than the plug-in,
+0.03491 against 0.03508.
+
+**Why it mattered.** The instruction is to hunt for a bug, and the handoff names the bug
+to hunt: a single shared `h_next` across draws. There was no such bug -- the same test
+passed at 95% and 99%, and the guard tests for that specific failure were already
+passing. Following the instruction would have meant changing correct code until an
+incorrect assertion passed, and the natural "fix" -- inflating the mixture's spread --
+would have manufactured exactly the widening the project set out to measure.
+
+**Solution.** Establish whether the test is wrong before touching the code
+(generalisation of #3 and #7, now applied to a claim inherited from a document rather
+than one of my own). The mixture quantiles were checked against four million draws taken
+from the same mixture by a different route -- sample a component, then sample its
+innovation -- and agreed to four significant figures. The solve was right, so the claim
+was wrong.
+
+And it is wrong for a reason, not by accident. A scale mixture holding *average* variance
+fixed is leptokurtic against the single distribution at that average: more peaked in the
+middle, heavier in the tails, because the total variance is conserved and has to come
+from somewhere. Measured on the same dispersed posterior:
+
+| Two-sided level | mixture / plug-in width |
+|---|---|
+| 90% | 0.995 |
+| 95% | 1.002 |
+| 99% | 1.017 |
+| 99.8% | 1.032 |
+
+The crossover sits between 90% and 95%. The handoff's "most visibly at the 99% level" was
+pointing at this without saying so; what it got wrong was the "≥" at every level.
+
+**Generalisation.** An inherited sanity check is a hypothesis, not an oracle. This one
+came from the project's own earlier self and was still only approximately true -- and the
+approximation failed in the direction that would have caused the most damage, since the
+repair it invites is indistinguishable from the finding it protects. Two tests now pin
+both sides: wider at 95% and 99%, narrower at 90%.
+
+---
+
+### 39. Cutting the draw count did not cut the audit's cost
+
+**Problem.** Decision D20 authorised running the Bayesian track in the look-ahead audit
+at a reduced draw count, reasoning that draw count controls Monte Carlo precision rather
+than which data reaches a fit, and that the audit's assertions are exact equalities under
+a fixed seed at any number of draws. The reasoning holds. The premise -- that draws are
+what the audit is paying for -- does not.
+
+Measured, at a 756-observation window: a refit at the frozen settings (4 chains x
+(1,000 tune + 1,000 draw)) takes 29s; the same refit at 2 chains x (50 tune + 25 draw)
+takes 9s. Cutting the work by 96% cut the wall clock by 69%. At 2,890 observations the
+same comparison is 83s against 17s, and the reduced-setting cost *rises with window
+length* even though the sampling work is identical.
+
+**Why it mattered.** The floor is compilation, not sampling: PyTensor must build and
+compile the gradient of the `scan` recursion for NUTS, the returns are a constant baked
+into that graph, so codegen scales with the window. Six backtest runs (one clean, three
+corruption dates, the corruption-effect check, the determinism check) x 102 refits x
+~12s puts a default `pytest` near two hours. A two-hour default test run is one nobody
+runs, and an audit nobody runs has been cut -- by attrition rather than by decision,
+which is worse, because the cut list at least gets argued.
+
+Passing the data through a `pytensor.shared` variable to keep it out of the graph was
+tried and is worse, not better: 20-29s per refit at the reduced settings, because the
+static shape is then unknown and the optimiser gives up. Reverted.
+
+**Solution.** D26: on every `pytest` the Bayesian track is audited with the sampler
+replaced by a deterministic stand-in that derives its draws from the estimation window
+and **records the exact array and `h0` it was handed**. Every look-ahead surface stays in
+the real code path at all 102 refit dates, and the central question -- did any fit see
+data from on or after its own refit date -- becomes an assertion on the sampler's input
+rather than an inference from output equality, which the real sampler cannot give. Eighty-
+four seconds. `pytest -m bayes_audit` then covers the sampler's own internals end to end
+at D20's reduced draw count, deselected by default and run deliberately before the
+write-up.
+
+That default deselection is the only one the never-cut rule tolerates, and only because
+it removes no coverage from a default run.
+
+**Generalisation.** "This knob controls the cost" deserves a measurement before it
+becomes a decision. D20 was written on an entirely reasonable model of where the time
+goes, and that model was wrong by a factor that changed what the decision was worth.
+
+---
+
+### 40. The gate on the forty-minute test was disarmed by the fast inner loop
+
+**Problem.** D26 put the real-sampler audit behind a `bayes_audit` marker and deselected
+it by default with `addopts = -m "not bayes_audit"` in `pytest.ini`. Then `pytest -m "not
+slow"` -- the documented fast inner loop, run dozens of times a day -- started the
+forty-minute test. It ran for ten minutes before being killed.
+
+**Why it mattered.** A command line's `-m` *replaces* the one in `addopts` rather than
+combining with it. So the deselection held for `pytest` and evaporated for every
+selection anyone would actually type. Worse, it evaporated silently: the fast suite
+simply stopped being fast, and the obvious diagnosis for a suddenly slow test run is that
+something in the new code is slow, not that a gate has quietly opened.
+
+**Solution.** An explicit `--bayes-audit` flag in `conftest.py`, which skips the test on
+collection unless passed. No `-m` can touch it. The marker stays, so
+`pytest --bayes-audit -m bayes_audit` still selects the test alone.
+
+**Generalisation.** A gate that a plausible everyday command disarms is not a gate. When
+something must be opt-in, make the opt-in a switch of its own rather than an option that
+composes -- and check the gate under the command lines people actually type, not only
+under the bare one.
+
+---
+
+### 41. The one-cause comparison had two causes
+
+**Problem.** The project's central claim, in the README and the plan alike: models 3 and
+4 share one likelihood, so *any* difference in their intervals is parameter uncertainty,
+full stop. The Stage 3 production run made the Bayesian intervals about 1.6% narrower at
+99%, and 2.9% narrower on stressed days. Read through that claim, this says parameter
+uncertainty *shrinks* intervals in a crisis -- a striking result, and a false one.
+
+**Why it mattered.** The claim is true of the posterior predictive against a plug-in **at
+the posterior mean**. It is false of the posterior predictive against a plug-in at the
+**MLE**, which is what the forecast table holds, because the two point estimates are not
+the same estimate: the MLE maximises the likelihood, and the posterior mean sits wherever
+the priors moved it. Decomposed on one COVID-period refit, at the 99% level: parameter
+uncertainty widens by 0.5%, and the priors narrow by 4.5%. The reported difference is
+nine parts prior to one part parameter uncertainty, and every word this project had
+written about it said the opposite.
+
+Nothing in the code was wrong. The claim was a sentence written before there were two
+point estimates to compare, and it went on sounding right after that stopped being true.
+
+**Solution.** Recorded at research_log.md 1.13, with the decomposition, and Stage 4 is
+now obliged to run it rather than attribute the difference. The cheap fix for the
+comparison itself is a fourth GARCH track -- plug-in at the posterior mean -- which needs
+no sampling, since the posterior means for all 102 refits are already in
+`refit_records.csv`.
+
+**Generalisation.** "The two models differ in exactly one respect" is a claim about a
+*comparison*, not about the code, and it decays silently when either side gains a moving
+part. The likelihood really is shared; the sentence stopped being true anyway. Check what
+a headline claim asserts against what the tables actually contain, each time the tables
+change.
+
+---
+
 ## Still open
 
 Carried forward deliberately, not overlooked:

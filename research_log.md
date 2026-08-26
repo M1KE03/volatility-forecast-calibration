@@ -622,6 +622,267 @@ generated at full settings regardless.
 
 ---
 
+### 1.11 Decided during Stage 3 implementation (2026-08-26)
+
+Everything here was settled after D4 and D17-D20 were frozen and before any Bayesian
+forecast reached the evaluation layer. Two entries record a measurement that contradicts
+an earlier decision's premise; per the append-only rule they supersede rather than edit
+it.
+
+**D21 -- The PyMC graph observes every return, not all but the first.** The 1.6
+feasibility probe wrote `observed=r[1:]`, dropping the first observation because the
+scan produces `h[1:]`. `garch11_t_loglik` does not: it seeds `h[0] = h0` and observes the
+whole window. The project's central design constraint is that models 3 and 4 share one
+likelihood, so the graph follows the NumPy function rather than the probe, and
+`test_the_pymc_graph_and_the_numpy_log_posterior_agree` checks the two agree at a fixed
+parameter vector -- to within `log(1 - alpha)`, which is the deliberate difference
+between a prior stated over `delta` (PyMC samples it) and one stated over `beta`
+(`log_prior` states it, with the change-of-variable Jacobian that the emcee fallback
+would need).
+
+The check found nothing wrong, which is the point of running it: "same likelihood" was
+until now a claim about two implementations that nothing verified.
+
+**D22 -- The `variance` column of a Bayesian forecast row is the posterior mean of
+`h`.** Not the variance of the predictive distribution, which additionally carries the
+spread of `mu` across draws. The column feeds QLIKE and MSE against the proxy, where the
+quantity wanted is an estimate of tomorrow's conditional variance, and the posterior mean
+is that estimate under squared-error loss. It is also the quantity directly comparable
+with the frequentist track's plug-in `h`. The predictive's own spread is what the
+interval columns report, and reporting it twice under two names would invite exactly the
+double-count this project exists to be careful about.
+
+**D23 -- Each refit samples under `mcmc_seed + refit_id`.** One RNG stream per refit
+rather than one per backtest, so no two refits share a chain's randomness. Fixed before
+the run and a function of the refit index alone, so it is not a retry: D16's rule that no
+failed fit is re-run under a different seed (extended to this track by D19) is untouched.
+
+**D24 -- The backtest runs as two tracks, `frequentist` and `bayes`, whose forecast
+tables are merged.** The frequentist track is 306 optimiser fits and takes about a
+minute; the Bayesian track is 102 NUTS fits and takes about 95. Splitting them means
+re-running the cheap one does not re-run the expensive one. Each track writes
+`forecasts_<track>.csv`, `refit_records_<track>.csv` and `backtest_config_<track>.json`;
+`forecasts.csv` is rebuilt from whichever partials exist, so the evaluation layer still
+reads one table and cannot read a table that was never written.
+
+The merge **compares the configs** rather than assuming they match, ignoring only the
+sampler fields, which are the Bayesian track's business alone. Merging tables computed
+under different proxy scales or refit cadences would produce a forecast file whose rows
+answer different questions and nothing downstream could detect it.
+
+`RefitRecord.mle_converged` and `.mle_message` are renamed to `.converged` and
+`.message` for the same reason: D19 applies D16's rule to both tracks with the same
+consequence, so the rule reads one field regardless of which estimator produced the
+verdict. `mle_loglik` keeps its name and is NaN on Bayesian rows -- a posterior has no
+maximised log-likelihood, and giving that slot a nearby quantity would invite a
+comparison across tracks that is not one.
+
+**The Bayesian predictive is not wider at every level, and the handoff's sanity check is
+wrong to expect it.** Measured on a dispersed posterior against the plug-in at its mean:
+width ratios of 0.995 at 90%, 1.002 at 95%, 1.017 at 99% and 1.032 at 99.8%. A scale
+mixture holding average variance fixed is leptokurtic against the single distribution at
+that average -- more peaked in the middle, heavier in the tails, because total variance
+is conserved. The crossover sits between 90% and 95%.
+
+This matters beyond bookkeeping: the handoff instructs the reader who meets a narrower
+interval to hunt for the shared-`h_next` bug, and the natural repair for a bug that is
+not there would manufacture the widening this project set out to measure. The mixture
+quantiles were verified against four million draws from the same mixture taken by a
+different route, agreeing to four significant figures, before the claim rather than the
+code was changed. Recorded at problems-and-solutions 38 and pinned by two tests, one on
+each side of the crossover.
+
+**D20's premise is contradicted by measurement; the audit's Bayesian coverage is
+reopened.** D20 authorised running the Bayesian track in the look-ahead audit at a
+reduced draw count, on the reasoning that draw count controls Monte Carlo precision
+rather than which data reaches a fit. That reasoning stands. What does not is the
+assumption that draws are what the audit pays for. Measured: a refit at the frozen
+settings costs 29s at n=756 and 83s at n=2,890; at 2 chains x (50 tune + 25 draw) it
+costs 9s and 17s. Cutting the sampling work by 96% cuts the wall clock by about 70%,
+because the floor is compiling the gradient of the `scan` recursion, and the returns sit
+in that graph as a constant, so codegen scales with the window. Six backtest runs x 102
+refits x ~12s puts a default `pytest` near two hours.
+
+A `pytensor.shared` variable to keep the data out of the graph was tried and is worse --
+20-29s per refit, the static shape being unknown defeats the optimiser -- and reverted.
+
+`AUDITED_MODELS` in `tests/test_backtest.py` currently holds the frequentist track alone
+and carries this open item in its docstring, where a reader meets it. **This is not a
+resolution**, and the audit is on the governing plan's never-cut list: leaving the model
+the project is named after outside its own look-ahead audit is not an available outcome.
+The options, none yet chosen:
+
+1. **Accept the cost.** A default `pytest` of about two hours. Honest, and unusable as an
+   inner loop; the risk is that the audit gets skipped in practice, which is the cut it
+   was protected from.
+2. **Audit the Bayesian track with the sampler stubbed.** Replace `sample_garch_posterior`
+   with a deterministic draw generator built from the training window, and have the stub
+   record the exact array it was handed. Every look-ahead surface the audit exists to
+   check -- the estimation slice, the `h0` backcast, the returns slice, the block
+   assignment, the daily filter, the mixture, the PIT -- stays inside the audit at all
+   102 refit dates, and *which data reached each fit* becomes an assertion on recorded
+   inputs rather than an inference from output equality, which is stronger than what the
+   real sampler gives. What is not covered is the sampler's own internals, which take
+   nothing but the two arrays they are handed.
+3. **A hybrid**: option 2 in the default suite, plus one real-sampler Bayesian audit over
+   all 102 refits behind its own marker, run deliberately before the write-up and its
+   result recorded here.
+
+---
+
+### 1.12 Decided after the Stage 3 smoke run (2026-08-26)
+
+Both decisions here respond to measurements taken on a 13-refit smoke run over
+2017-01-03 to 2018-01-05, before any Bayesian forecast reached the evaluation layer.
+They resolve the open item 1.11 left and supersede two parts of D17 and D20.
+
+**D25 -- `target_accept` raised from 0.9 to 0.95, for every refit, before the production
+run.**
+
+One of the 13 smoke refits (2017-02-02, n=777) produced four divergent transitions and
+so, under D19, no forecasts for the 21 days it served. At that rate roughly 8 of 102
+refits would fail and about 170 of the 2,134 evaluation days would carry no Bayesian
+forecast. The cost of that is not mainly the missing days. It is that they would not be
+missing at random: a posterior whose geometry defeats the sampler is plausibly a window
+where persistence runs hard against the stationarity boundary, and 1.9 recorded the data
+doing exactly that. The Bayesian model would then be evaluated on a subsample selected by
+a mechanism correlated with the thing being measured, and every pairwise comparison --
+the DM tests especially -- would be run on dates chosen partly by the sampler.
+
+Measured on the refit that failed, at the frozen 4 chains x (1,000 + 1,000):
+
+| `target_accept` | divergences | converged | R-hat | min `ess_tail` | seconds |
+|---|---|---|---|---|---|
+| 0.90 | 4 | no | -- | -- | 33 |
+| 0.95 | 0 | yes | 1.0044 | 1,582 | 35 |
+| 0.99 | 0 | yes | 1.0017 | 1,395 | 51 |
+
+0.95 removes them at no cost; 0.99 costs half again as much wall clock for nothing.
+
+**This is a change to a frozen decision made after seeing it fail, so the reason it is
+not the thing D19 forbids has to be stated rather than assumed.** `target_accept` is not
+a diagnostic threshold. It is how hard the sampler works: raising it shortens the leapfrog
+step so NUTS meets the *unchanged* D19 criterion, which is the opposite of loosening a
+test that fired. And it is applied uniformly to all 102 refits and fixed before the
+production run, so it is not the per-refit reseeding D16 and D19 rule out -- no fit is
+re-run under different settings because it failed. Had the change been to accept a small
+number of divergences, or to re-run only the refits that failed, it would have been that
+thing and would not have been made.
+
+Recorded here rather than folded into D17 because the log is append-only, and because a
+reader is entitled to know that the setting the production run used was chosen after a
+smoke run at a different one. **The report must say so.**
+
+**D26 -- The Bayesian look-ahead audit runs against a recording stub on every test run,
+with a real-sampler confirmation behind its own marker.**
+
+This resolves the item 1.11 left open, and supersedes D20's arrangement while keeping the
+half of D20 that survives measurement.
+
+On every `pytest`, the Bayesian track is audited with `sample_garch_posterior` replaced
+by a deterministic stand-in that derives its draws from the estimation window and
+**records the exact array and `h0` it was handed**. Every surface by which the future
+could reach a forecast stays in the real code path at all 102 refit dates: the estimation
+slice, the backcast, the `returns[:stop]` bound, the block assignment, the per-draw
+filter, the mixture, the PIT. And the central question -- did any fit see data from on or
+after its own refit date -- stops being an inference from output equality and becomes an
+assertion on the sampler's own input, which the real sampler cannot provide. The three
+corruption dates and the negative control carry over unchanged; the whole thing runs in
+84 seconds.
+
+What the stub does not cover is the sampler's internals, which receive nothing but those
+two recorded arrays. `pytest -m bayes_audit` covers them end to end with NUTS actually
+sampling, at D20's reduced draw count -- the part of D20 that measurement leaves intact,
+since the assertions are exact equalities under a fixed seed and a fixed seed is as exact
+at 50 draws as at 2,000. It takes about 40 minutes, is deselected by default, and is to
+be **run deliberately before the write-up with its result recorded here**.
+
+The default deselection is the only one the never-cut rule tolerates, and only because it
+removes no coverage from a default run: the marked test adds a confirmation, it does not
+carry the audit. The alternative -- the real sampler in the default suite -- was rejected
+on the measurement in 1.11: near two hours for a `pytest` run, which cuts the audit by
+attrition rather than by decision.
+
+---
+
+### 1.13 Stage 3 production run, and what it does to the headline comparison (2026-08-26)
+
+**The run.** 102 refits, 4 chains x (1,000 tune + 1,000 draw) at `target_accept` 0.95,
+82.5 minutes of sampling. **100 of 102 converged.** Worst R-hat 1.0049, minimum
+`ess_bulk` 1,475, minimum `ess_tail` 972, four divergent transitions in total. The two
+failures are 2025-02-10 (three divergences) and 2025-03-12 (one), so 42 of the 2,134
+evaluation days carry no Bayesian forecast and are NaN in `forecasts.csv` under D19.
+Neither was re-run. Mean annualised volatility 18.94%, against 19.37% for `garch_mle`,
+18.86% for `ewma` and 17.71% for `yesterday`.
+
+**The sanity check fails in the direction nobody expected, and it is not a bug.** Over
+the full evaluation window the Bayesian intervals are *narrower* than the frequentist
+plug-in at every level -- mean width ratios 0.9945 at 90%, 0.9915 at 95%, 0.9842 at 99%,
+0.9869 on the 99% VaR -- and the gap is widest exactly where the project's finding was
+expected to live: by regime at the 99% level, 0.9962 calm, 0.9796 normal, **0.9709
+stressed**.
+
+The handoff said to hunt for the shared-`h_next` bug if this happened. It was hunted, by
+decomposition rather than by inspection. Three predictives were built for one day in the
+COVID stress (refit 2020-04-06, n=1,575):
+
+| | 90% | 95% | 99% |
+|---|---|---|---|
+| **C / B** -- posterior predictive over plug-in **at the posterior mean** | 0.9968 | 0.9991 | **1.0046** |
+| **B / A** -- plug-in at the posterior mean over plug-in **at the MLE** | 0.9725 | 0.9677 | **0.9550** |
+| **C / A** -- what the forecast table reports | 0.9695 | 0.9669 | 0.9594 |
+
+`C / B` is the mixture doing exactly what it was built to do: wider at 99%, marginally
+narrower at 90%, the leptokurtosis crossover recorded at 1.11 and pinned by tests. The
+per-draw `h_next` has a spread of 12.4% of its mean, so parameter uncertainty is present
+and is being integrated over. It is simply **small at this sample size** -- 0.46% on the
+99% width at n = 1,575 -- which is the outcome the governing plan's risk register named in
+advance: "at n≈750+, parameter uncertainty moves intervals less than
+innovation-distribution choice."
+
+`B / A` is four to five times larger and points the other way. It is the **priors moving
+the point estimate**, and the mechanism is visible in the refit table:
+
+| | mean `alpha+beta` | max | mean `nu` |
+|---|---|---|---|
+| `garch_mle` | 0.98926 | 0.99998 (16 refits above 0.999) | 5.198 |
+| `garch_bayes` | 0.97859 | 0.99086 | 5.508 |
+
+Both mechanisms push the same way. `beta = (1 - alpha) * delta` with `delta ~ Beta(3, 1)`
+makes `alpha + beta < 1` hold by construction and so pulls persistence off the boundary
+the MLE runs into, which lowers the one-step variance forecast after a shock -- hence the
+gap being largest in the stressed regime. And the `nu` prior, with mean 14, leans toward
+near-normal tails and lifts posterior `nu` above the MLE, thinning the Bayesian tails
+exactly at 99%. Both are consequences of priors frozen at D4 before any of this was
+visible, which is what makes them reportable rather than embarrassing.
+
+**The consequence, and it is not cosmetic. This project's stated one-cause comparison is
+not currently a one-cause comparison.** The claim -- in the README, in the plan's
+"interview ammunition", and in this log -- is that models 3 and 4 share a likelihood so
+that *any interval difference is parameter uncertainty, full stop*. That is true of `C`
+against `B`. It is **false** of `C` against `A`, which is what `forecasts.csv` reports,
+because `A` sits at the maximum of the likelihood and `B` sits at the mean of a
+posterior that the priors have moved. The measured difference between the two models is
+mostly prior, not parameter uncertainty, and reporting it as the latter would be a
+straightforward misattribution -- the more dangerous for being in the direction of a
+tidy story.
+
+Nothing here is a defect in the code, and no result is withdrawn. What changes is what
+Stage 4 is allowed to say about the numbers it computes. **The report must not attribute
+the frequentist-Bayesian interval difference to parameter uncertainty without the
+decomposition above**, and the honest headline is now a comparison of three things rather
+than two.
+
+**Recommended, but not decided here**, since it adds a model track and that is a scope
+decision: carry a fourth GARCH track, plug-in at the posterior mean, through the same
+backtest. It costs almost nothing -- the posterior means for all 102 refits are already
+in `refit_records.csv`, and the track is `garch11_filter` plus `plugin_predictive`, no
+sampling -- and it turns the muddled two-way comparison into the clean three-way one the
+table above shows on a single day. It would be an ablation in the sense `garch_mle_normal`
+is, not a fifth competitor, and would stay out of the headline table.
+
+---
+
 ## 2. Changelog
 
 ### Stage 0 — Inspection and risk review (2026-08-21)
@@ -1016,3 +1277,68 @@ estimation window alone), and the daily filter.
 
 Next: Stage 3, Bayesian GARCH(1,1)-t. D4 -- the priors -- is still open and must be
 frozen in this log before any Bayesian out-of-sample number is computed.
+
+### Stage 3 -- Bayesian GARCH(1,1)-t (2026-08-26)
+
+The fourth forecaster exists. `models.py` is complete; `backtest.py` runs two tracks;
+`forecasts.csv` carries all five model keys over the 2,134-day evaluation window.
+
+**Priors first, code second.** D4 was resolved and written into 1.10 before a line of the
+sampler was written, and the constants live in one block above `log_prior` with a test
+that breaks if any of them moves. The one departure from the 1.6 feasibility probe --
+`delta ~ Beta(3, 1)` rather than `Beta(10, 2)` -- was made on the structural argument that
+a `Beta(a, b)` density vanishes at 1 whenever `b > 1`, and the magnitude was measured
+afterwards rather than used to choose.
+
+**One likelihood, now verified rather than asserted.** The project's central design
+constraint is that models 3 and 4 share `garch11_t_loglik`. PyMC does not call it -- it
+builds its own graph -- so until this stage the constraint was a claim about two
+implementations that nothing checked. `test_the_pymc_graph_and_the_numpy_log_posterior_agree`
+evaluates both at the same parameter vector and requires agreement to floating point,
+up to the deliberate `log(1 - alpha)` between a prior stated over `delta` and one stated
+over `beta`. The graph also observes every return with `h[0] = h0`, matching the NumPy
+likelihood rather than the probe's `r[1:]` (D21).
+
+**The dangerous bug is unreachable rather than avoided.** `mixture_predictive` refuses any
+`h_next` that is not one value per draw, and two tests pin both limits: a dispersed
+posterior is strictly wider than the plug-in at 95% and 99%, and a posterior collapsed to
+a point mass reproduces it exactly -- to 0.0, not to a tolerance.
+
+**The sanity check inherited from the handoff was wrong, and following it would have
+manufactured the finding.** It said Bayesian intervals should be at least as wide at every
+level. A scale mixture holding average variance fixed is leptokurtic against the single
+distribution at that average, so the ratio crosses 1 between 90% and 95%. The quantile
+solve was verified against four million draws from the same mixture before the claim
+rather than the code was changed. Problems-and-solutions 38.
+
+**Cost, and a decision reopened because its premise was wrong.** A refit costs 29s at
+n=756 and 83s at n=2,890, so the production run is about 95 minutes -- and the same refit
+at 2 chains x (50 tune + 25 draw) still costs 9s, because the floor is compiling the
+gradient of the scan recursion, not sampling. D20 had traded Monte Carlo precision to make
+the look-ahead audit affordable on the assumption that draws were what it paid for. D26
+replaces that: the Bayesian track is audited on every run against a recording stub, which
+covers every look-ahead surface at all 102 refit dates and additionally asserts what data
+each fit was handed, while `pytest --bayes-audit` runs the real sampler end to end.
+Problems-and-solutions 39 and 40.
+
+**`target_accept` 0.9 -> 0.95 (D25)**, before the production run, after a smoke refit
+produced four divergences and therefore no forecasts for the 21 days it served. Measured
+on that refit: 0 divergences at 0.95, at 35s against 33s. It is sampler effort rather than
+a diagnostic threshold, and the report is obliged to say it was changed.
+
+**The run.** 100 of 102 refits converged; worst R-hat 1.0049, minimum `ess_tail` 972, four
+divergences in total. The two failures leave 42 evaluation days without a Bayesian
+forecast, recorded as NaN and not re-run.
+
+**The result, and it is not the expected one.** Bayesian intervals come out *narrower*
+than the frequentist plug-in at every level and most in stress -- 0.9709 at the 99% level
+on stressed days. Decomposed at 1.13: the mixture is carrying parameter uncertainty
+correctly (+0.46% on the 99% width), and is outweighed four to five times over by the
+priors moving the point estimate, which pull persistence off the boundary the MLE runs
+into (mean `alpha+beta` 0.9786 against 0.9893) and lift `nu` above it (5.51 against 5.20).
+**The consequence is that the frequentist-Bayesian interval difference is not attributable
+to parameter uncertainty**, which is what this project has been saying it would be, and
+1.13 records what Stage 4 must therefore do differently.
+
+Next: Stage 4, the evaluation layer. Everything it needs is in `forecasts.csv`; it should
+re-run no part of the backtest.

@@ -165,6 +165,7 @@ Checkpoint rule: if Stage 3 isn't producing forecasts by the end of day 4, switc
 - Why QLIKE: proxy-robust loss (Patton 2011) — with a noisy volatility proxy, MSE rankings can be distorted; QLIKE's ranking is consistent, and it penalizes under-predicting vol more than over-predicting, matching risk-management asymmetry.
 - Why Christoffersen beats Kupiec: correct *average* coverage can hide breaches that cluster in crises; independence of the hit sequence is the real requirement.
 - The one-cause comparison: identical likelihood, plug-in vs posterior predictive — any interval difference is parameter uncertainty, full stop.
+  - **Superseded by measurement at Stage 3; the sentence above is left as written because this document is the contract, not a record of what turned out to be true.** It holds against a plug-in at the *posterior mean*. Against a plug-in at the *MLE* — which is what `forecasts.csv` holds — it does not, because the priors move the point estimate: measured at the 99% level, parameter uncertainty widens by 0.5% and the priors narrow by 4.5%. See `research_log.md` §1.13 and problems-and-solutions #41. Know the corrected version cold, not this one.
 - Why block bootstrap: forecast errors are serially dependent; iid resampling destroys that dependence and understates uncertainty.
 - Why coverage is evaluated on returns, not the proxy: returns are observed; volatility never is.
 

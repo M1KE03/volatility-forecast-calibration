@@ -34,6 +34,7 @@ how a look-ahead test quietly stops testing anything.
 
 from __future__ import annotations
 
+import json
 from dataclasses import asdict
 
 import numpy as np
@@ -57,6 +58,16 @@ FORECAST_COLUMNS = [
 ]
 
 
+#: The models the audit runs with the real estimators in place.
+#:
+#: The Bayesian track is audited too, but separately and against a recording stub -- see
+#: the section at the bottom of this file for why that is the stronger arrangement rather
+#: than a concession, and ``test_bayesian_look_ahead_with_the_real_sampler`` for the
+#: confirmation run that uses NUTS itself. Both halves are under the same corruption
+#: dates and the same claim.
+AUDITED_MODELS: tuple[str, ...] = B.FREQUENTIST_MODELS
+
+
 @pytest.fixture(scope="module")
 def frame() -> pd.DataFrame:
     """The real analysis frame. These tests are about the real pipeline, not a mock."""
@@ -76,7 +87,7 @@ def full_run(frame: pd.DataFrame) -> tuple[pd.DataFrame, list[B.RefitRecord]]:
     coverage, since it is the same deterministic run each time --
     ``test_run_is_deterministic`` is what establishes that.
     """
-    return B.run_backtest(frame)
+    return B.run_backtest(frame, models=AUDITED_MODELS)
 
 
 # --- Look-ahead tests --------------------------------------------------------------
@@ -109,18 +120,18 @@ def test_master_look_ahead_corrupting_the_future_leaves_the_past_identical(
     corrupted.loc[mask, "log_return"] = rng.normal(0.0, 0.5, size=int(mask.sum()))
     corrupted.loc[mask, "parkinson_var"] = rng.uniform(0.01, 0.10, size=int(mask.sum()))
 
-    recomputed, _ = B.run_backtest(corrupted)
+    recomputed, _ = B.run_backtest(corrupted, models=AUDITED_MODELS)
 
     # Forecasts up to and including the cut date use data through cut-1 only.
     past = baseline.index <= cut
-    for model in B.MODELS:
+    for model in AUDITED_MODELS:
         a = baseline[(baseline.model == model) & past][FORECAST_COLUMNS]
         b = recomputed[(recomputed.model == model) & past][FORECAST_COLUMNS]
         pd.testing.assert_frame_equal(a, b, check_exact=True)
 
     # And strictly before the cut, the evaluation columns are untouched too.
     strictly_past = baseline.index < cut
-    for model in B.MODELS:
+    for model in AUDITED_MODELS:
         a = baseline[(baseline.model == model) & strictly_past]
         b = recomputed[(recomputed.model == model) & strictly_past]
         pd.testing.assert_frame_equal(a, b, check_exact=True)
@@ -139,10 +150,10 @@ def test_corruption_actually_changes_the_future(frame: pd.DataFrame, full_run) -
     mask = corrupted.index >= cut
     corrupted.loc[mask, "log_return"] = 0.5
     corrupted.loc[mask, "parkinson_var"] = 0.05
-    recomputed, _ = B.run_backtest(corrupted)
+    recomputed, _ = B.run_backtest(corrupted, models=AUDITED_MODELS)
 
     future = baseline.index > cut
-    for model in B.MODELS:
+    for model in AUDITED_MODELS:
         a = baseline[(baseline.model == model) & future]["variance"]
         b = recomputed[(recomputed.model == model) & future]["variance"]
         assert not np.allclose(a.to_numpy(), b.to_numpy()), (
@@ -242,7 +253,7 @@ def test_estimation_slice_expands(frame: pd.DataFrame) -> None:
 def test_no_reordering_of_dates(full_run) -> None:
     """Invariant 6. A shuffle anywhere would invalidate every serial-dependence claim."""
     forecasts, _ = full_run
-    for model in B.MODELS:
+    for model in AUDITED_MODELS:
         idx = forecasts[forecasts.model == model].index
         assert idx.is_monotonic_increasing
         assert idx.is_unique
@@ -258,7 +269,7 @@ def test_forecast_table_is_complete_over_the_evaluation_window(
     forecasts, _ = full_run
     oos = frame.loc[pd.Timestamp(D.OOS_START) : pd.Timestamp(D.OOS_END)]
 
-    for model in B.MODELS:
+    for model in AUDITED_MODELS:
         sub = forecasts[forecasts.model == model]
         assert len(sub) == len(oos) == 2134
         assert sub.index.equals(pd.DatetimeIndex(oos.index))
@@ -337,7 +348,7 @@ def test_run_is_deterministic(frame: pd.DataFrame, full_run) -> None:
     published number that moves between runs cannot be checked by anyone.
     """
     a, _ = full_run
-    b, _ = B.run_backtest(frame)
+    b, _ = B.run_backtest(frame, models=AUDITED_MODELS)
     pd.testing.assert_frame_equal(a, b, check_exact=True)
 
 
@@ -349,7 +360,7 @@ def test_rolling_window_is_rejected_rather_than_silently_supported() -> None:
 
 def test_missing_columns_are_rejected(frame: pd.DataFrame) -> None:
     with pytest.raises(ValueError, match="missing columns"):
-        B.run_backtest(frame.drop(columns=["parkinson_var"]))
+        B.run_backtest(frame.drop(columns=["parkinson_var"]), models=AUDITED_MODELS)
 
 
 def test_variances_are_on_the_close_to_close_scale(frame: pd.DataFrame, full_run) -> None:
@@ -463,10 +474,10 @@ def test_every_refit_converged(full_run) -> None:
     _, records = full_run
     frame = _records_frame(records)
     fits = frame[frame["model"].isin(B.GARCH_MODELS)]
-    failed = fits[~fits["mle_converged"]]
+    failed = fits[~fits["converged"]]
     assert failed.empty, (
         "refits did not converge:\n"
-        + failed[["model", "refit_date", "mle_message"]].to_string()
+        + failed[["model", "refit_date", "message"]].to_string()
     )
     assert np.isfinite(fits["mle_loglik"]).all()
 
@@ -515,7 +526,7 @@ def test_a_failed_refit_produces_no_forecasts_rather_than_stale_ones(
     monkeypatch.setattr(M, "fit_garch_mle", failing_fit)
     path, records = B.build_garch_paths(frame, config, model="garch_mle")
 
-    failed = [r for r in records if not r.mle_converged]
+    failed = [r for r in records if not r.converged]
     assert len(failed) == 1, "the forced failure did not land on exactly one refit"
     assert failed[0].refit_date == doomed
 
@@ -615,9 +626,359 @@ def test_build_garch_paths_rejects_a_model_it_does_not_fit(frame: pd.DataFrame) 
 
 def test_the_model_registry_is_internally_consistent() -> None:
     """The tuples the evaluation layer will filter on must agree with each other."""
-    assert B.MODELS == B.BASELINE_MODELS + B.GARCH_MODELS
+    assert B.MODELS == B.BASELINE_MODELS + B.GARCH_MODELS + B.BAYES_MODELS
+    assert B.MODELS == B.FREQUENTIST_MODELS + B.BAYES_MODELS
     assert set(B.HEADLINE_MODELS) < set(B.MODELS)
+    assert B.BAYES_MODEL in B.HEADLINE_MODELS, (
+        "the model the project is named after belongs in the headline comparison"
+    )
+    assert set().union(*B.TRACKS.values()) == set(B.MODELS), (
+        "every model must belong to a track, or a stage will silently never build it"
+    )
     assert "garch_mle_normal" not in B.HEADLINE_MODELS, (
         "the ablation must not appear in the headline comparison"
     )
     assert set(B.INNOVATION_BY_MODEL) == set(B.GARCH_MODELS)
+
+
+# --- The two-track split and its merge ---------------------------------------------
+#
+# Plumbing, but plumbing that decides what every downstream table is computed from. A
+# merge that silently joined two runs made under different configurations would produce
+# a forecast file whose rows answered different questions, and nothing further down could
+# detect it.
+
+
+def _fake_track_output(
+    model: str, n: int = 5
+) -> tuple[pd.DataFrame, list[B.RefitRecord]]:
+    """A minimal forecast table and refit record for one model."""
+    dates = pd.bdate_range("2017-01-03", periods=n)
+    forecasts = pd.DataFrame(
+        {
+            "model": model,
+            "variance": np.linspace(1e-4, 2e-4, n),
+            "mean": 0.0,
+            "lo_90": -0.01,
+            "hi_90": 0.01,
+            "pit": np.linspace(0.1, 0.9, n),
+        },
+        index=pd.Index(dates, name="date"),
+    )
+    records = [
+        B.RefitRecord(
+            refit_id=0,
+            refit_date=dates[0],
+            train_start=dates[0],
+            train_end=dates[-1],
+            n_obs=n,
+            model=model,
+        )
+    ]
+    return forecasts, records
+
+
+def test_merged_table_is_the_union_of_the_tracks(tmp_path) -> None:
+    config = B.BacktestConfig()
+    freq, freq_records = _fake_track_output("garch_mle")
+    bayes, bayes_records = _fake_track_output("garch_bayes")
+
+    B.save_track("frequentist", freq, freq_records, config, tmp_path)
+    B.save_track("bayes", bayes, bayes_records, config, tmp_path)
+
+    merged = pd.read_csv(tmp_path / "forecasts.csv", index_col=0, parse_dates=True)
+    assert set(merged["model"]) == {"garch_mle", "garch_bayes"}
+    assert len(merged) == len(freq) + len(bayes)
+    # Report order within a date, so a rebuilt file is comparable with the last one.
+    first_day = merged.loc[merged.index[0]]
+    assert list(first_day["model"]) == ["garch_mle", "garch_bayes"]
+
+    records = pd.read_csv(tmp_path / "refit_records.csv")
+    assert set(records["model"]) == {"garch_mle", "garch_bayes"}
+
+
+def test_a_track_written_alone_still_produces_a_merged_table(tmp_path) -> None:
+    """The frequentist stage must leave a usable forecasts.csv before the Bayesian
+    stage has ever run -- otherwise Stage 3 becomes a prerequisite for Stage 2's own
+    output."""
+    config = B.BacktestConfig()
+    freq, freq_records = _fake_track_output("garch_mle")
+    B.save_track("frequentist", freq, freq_records, config, tmp_path)
+
+    merged = pd.read_csv(tmp_path / "forecasts.csv", index_col=0, parse_dates=True)
+    assert set(merged["model"]) == {"garch_mle"}
+
+
+def test_merging_refuses_tracks_run_under_different_configurations(tmp_path) -> None:
+    """**The check that stops two half-runs from being read as one.**
+
+    Two tracks made under different proxy scales produce rows that are not comparable,
+    and the difference is invisible in the merged file. The merge has to be the thing
+    that notices, because nothing downstream can.
+    """
+    freq, freq_records = _fake_track_output("garch_mle")
+    bayes, bayes_records = _fake_track_output("garch_bayes")
+
+    B.save_track("frequentist", freq, freq_records, B.BacktestConfig(), tmp_path)
+    with pytest.raises(ValueError, match="different configurations"):
+        B.save_track(
+            "bayes",
+            bayes,
+            bayes_records,
+            B.BacktestConfig(proxy_scale_c=1.0),
+            tmp_path,
+        )
+
+
+def test_a_sampler_setting_does_not_make_two_tracks_incompatible(tmp_path) -> None:
+    """The negative control for the check above.
+
+    The frequentist track records whatever sampler settings it was handed and never
+    reads them. If a difference there blocked the merge, raising ``target_accept`` would
+    force a pointless re-run of a track it cannot affect -- and a check that fires on
+    irrelevant differences gets disabled.
+    """
+    freq, freq_records = _fake_track_output("garch_mle")
+    bayes, bayes_records = _fake_track_output("garch_bayes")
+
+    B.save_track(
+        "frequentist", freq, freq_records, B.BacktestConfig(target_accept=0.9), tmp_path
+    )
+    B.save_track(
+        "bayes", bayes, bayes_records, B.BacktestConfig(target_accept=0.95), tmp_path
+    )
+
+    with (tmp_path / "backtest_config.json").open(encoding="utf-8") as fh:
+        merged = json.load(fh)
+
+    # And the merged config reports the settings that were actually sampled under, not
+    # the inert copy the frequentist track carried.
+    assert merged["target_accept"] == 0.95
+
+
+def test_run_backtest_rejects_a_model_it_does_not_have(frame: pd.DataFrame) -> None:
+    with pytest.raises(ValueError, match="unknown models"):
+        B.run_backtest(frame, models=("garch_bayes", "stochastic_vol"))
+
+
+# --- The Bayesian track's look-ahead audit -----------------------------------------
+#
+# Run against a **recording stub** in place of NUTS, and the substitution is what makes
+# the audit stronger here rather than weaker.
+#
+# D20 authorised running the real sampler at a reduced draw count, reasoning that draws
+# control Monte Carlo precision rather than which data reaches a fit. The reasoning
+# holds; the premise does not. Measured at Stage 3, a refit costs 9-17s *before it draws
+# anything* -- the floor is compiling the gradient of the scan recursion -- so cutting
+# draws by 96% cuts wall clock by about 70%, and six backtest runs x 102 refits puts a
+# default ``pytest`` near two hours. An audit that slow gets skipped in practice, which
+# is the cut the governing plan's never-cut list exists to prevent. Recorded at
+# research_log.md 1.11-1.12 and problems-and-solutions 39.
+#
+# What the stub changes: nothing the audit is about. Every look-ahead surface --
+# ``estimation_slice``, the ``h0`` backcast, the ``returns[:stop]`` slice, the block
+# assignment, the per-draw filter, the mixture, the PIT -- runs in the real code path at
+# all 102 refit dates. And *which data reached each fit* stops being an inference from
+# output equality and becomes an assertion on the array the sampler was actually handed,
+# which the real sampler cannot give.
+#
+# What it does not cover: the sampler's own internals. Those receive nothing but the two
+# arrays recorded here, and ``test_bayesian_look_ahead_with_the_real_sampler`` covers
+# them end to end behind its own marker.
+
+
+def _stub_posterior_draws(returns: np.ndarray, n_draws: int = 64) -> np.ndarray:
+    """A deterministic stand-in for a posterior, computed from the estimation window.
+
+    Two properties are load-bearing. The draws must **depend on the data**, or corrupting
+    the past would not move the forecasts and the audit would pass on a pipeline that
+    ignored its input entirely (the failure #24 records). And they must **differ from
+    each other**, or the mixture would collapse to a single component and the per-draw
+    filter would never be exercised.
+
+    Every draw is admissible by construction: ``alpha + beta`` spans [0.94, 0.96] and
+    ``nu`` spans [5, 9].
+    """
+    values = np.asarray(returns, dtype=float)
+    grid = np.linspace(-1.0, 1.0, n_draws)
+    alpha = 0.10 + 0.02 * grid
+    beta = 0.85 - 0.03 * grid
+    variance = float(values.var(ddof=1))
+    return np.column_stack(
+        [
+            np.full(n_draws, float(values.mean())),
+            variance * (1.0 - alpha - beta),
+            alpha,
+            beta,
+            7.0 + 2.0 * grid,
+        ]
+    )
+
+
+def _install_recording_stub(monkeypatch) -> list[tuple[np.ndarray, float]]:
+    """Replace the sampler with the stub; return the list its calls are recorded into."""
+    calls: list[tuple[np.ndarray, float]] = []
+
+    def stub(returns, *, h0=None, **kwargs):
+        values = np.asarray(returns, dtype=float)
+        h0_used = M.backcast_initial_variance(values) if h0 is None else float(h0)
+        calls.append((values.copy(), h0_used))
+        draws = _stub_posterior_draws(values)
+        return M.BayesianFit(
+            draws=draws,
+            log_prob=np.zeros(draws.shape[0]),
+            r_hat=np.ones(len(M.PARAM_NAMES)),
+            ess_bulk=np.full(len(M.PARAM_NAMES), 4000.0),
+            ess_tail=np.full(len(M.PARAM_NAMES), 4000.0),
+            n_divergences=0,
+            converged=True,
+            message="stub sampler",
+            n_obs=int(values.size),
+            seed=0,
+        )
+
+    monkeypatch.setattr(M, "sample_garch_posterior", stub)
+    return calls
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("corrupt_from", ["2018-02-05", "2020-03-16", "2022-06-13"])
+def test_bayesian_look_ahead_corrupting_the_future_leaves_the_past_identical(
+    frame: pd.DataFrame, corrupt_from: str, monkeypatch
+) -> None:
+    """The master test, extended to the model the project is named after.
+
+    Same corruption dates as the frequentist audit, and the same claim: a forecast for a
+    date at or before the cut cannot move when every observation from the cut onward is
+    replaced with noise.
+    """
+    cut = pd.Timestamp(corrupt_from)
+
+    _install_recording_stub(monkeypatch)
+    baseline, _ = B.run_backtest(frame, models=B.BAYES_MODELS)
+
+    corrupted = frame.copy()
+    mask = corrupted.index >= cut
+    assert mask.sum() > 0, "corruption window is empty; the test would be vacuous"
+    rng = np.random.default_rng(20260826)
+    corrupted.loc[mask, "log_return"] = rng.normal(0.0, 0.5, size=int(mask.sum()))
+    corrupted.loc[mask, "parkinson_var"] = rng.uniform(0.01, 0.10, size=int(mask.sum()))
+
+    _install_recording_stub(monkeypatch)
+    recomputed, _ = B.run_backtest(corrupted, models=B.BAYES_MODELS)
+
+    past = baseline.index <= cut
+    pd.testing.assert_frame_equal(
+        baseline[past][FORECAST_COLUMNS], recomputed[past][FORECAST_COLUMNS],
+        check_exact=True,
+    )
+    strictly_past = baseline.index < cut
+    pd.testing.assert_frame_equal(
+        baseline[strictly_past], recomputed[strictly_past], check_exact=True
+    )
+
+
+@pytest.mark.slow
+def test_bayesian_corruption_actually_changes_the_future(
+    frame: pd.DataFrame, monkeypatch
+) -> None:
+    """The negative control. Without it the test above would pass on a pipeline whose
+    Bayesian forecasts ignored the data entirely -- which is exactly what a stub could
+    quietly become if its draws stopped depending on the estimation window."""
+    cut = pd.Timestamp("2020-03-16")
+
+    _install_recording_stub(monkeypatch)
+    baseline, _ = B.run_backtest(frame, models=B.BAYES_MODELS)
+
+    corrupted = frame.copy()
+    mask = corrupted.index >= cut
+    corrupted.loc[mask, "log_return"] = 0.5
+    corrupted.loc[mask, "parkinson_var"] = 0.05
+
+    _install_recording_stub(monkeypatch)
+    recomputed, _ = B.run_backtest(corrupted, models=B.BAYES_MODELS)
+
+    future = baseline.index > cut
+    assert not np.allclose(
+        baseline[future]["variance"].to_numpy(), recomputed[future]["variance"].to_numpy()
+    ), "corrupting the future did not move the Bayesian model's later forecasts"
+
+
+@pytest.mark.slow
+def test_every_bayesian_fit_saw_only_data_from_before_its_refit_date(
+    frame: pd.DataFrame, monkeypatch
+) -> None:
+    """**What the stub buys that the real sampler could not.**
+
+    The audit above infers that no future data reached a fit from the fact that no
+    forecast moved. This asserts it directly, on the array each fit was handed: every
+    estimation window is a prefix of the sample, ends strictly before its own refit date,
+    and grows by exactly the refit cadence. A leak would have to survive being read off
+    the sampler's own input.
+    """
+    calls = _install_recording_stub(monkeypatch)
+    config = B.BacktestConfig()
+    B.run_backtest(frame, config, models=B.BAYES_MODELS)
+
+    full_index = pd.DatetimeIndex(frame.index)
+    returns = frame["log_return"].to_numpy(dtype=float)
+    oos_index = pd.DatetimeIndex(
+        frame.loc[pd.Timestamp(D.OOS_START) : pd.Timestamp(D.OOS_END)].index
+    )
+    refit_dates = B.make_refit_dates(oos_index, refit_every=config.refit_every)
+
+    assert len(calls) == len(refit_dates) == 102
+
+    for refit_date, (window, h0) in zip(refit_dates, calls):
+        # The window is a prefix of the sample: same values, same order, no gaps.
+        np.testing.assert_array_equal(window, returns[: window.size])
+        # And it stops before the date it is used to forecast.
+        last_used = full_index[window.size - 1]
+        assert last_used < refit_date, (
+            f"the fit for {refit_date.date()} was handed data through {last_used.date()}"
+        )
+        # h0 is backcast from that window alone, not from the sample.
+        assert h0 == pytest.approx(M.backcast_initial_variance(window), rel=1e-12)
+
+    sizes = [window.size for window, _ in calls]
+    assert sizes == sorted(sizes) and len(set(sizes)) == len(sizes)
+    assert set(np.diff(sizes)) == {config.refit_every}
+
+
+@pytest.mark.bayes_audit
+def test_bayesian_look_ahead_with_the_real_sampler(frame: pd.DataFrame) -> None:
+    """The same audit with NUTS actually sampling. **Not run by default; about 40
+    minutes.**
+
+    The stubbed audit above covers every surface by which the future could reach a
+    forecast, and covers the sampler's inputs better than this test can. What only this
+    one covers is the sampler itself: that a seeded PyMC run over an estimation window is
+    a function of that window and nothing else, end to end, in the real code path.
+
+    Reduced draws, per D20 -- the part of that decision that survives measurement. The
+    assertions are exact equalities under a fixed seed, and a fixed seed is as exact at
+    50 draws as at 2,000. One corruption date rather than three, the largest COVID
+    drawdown day, because the marginal date buys less here than the stubbed audit already
+    gives.
+
+    Run it deliberately before the write-up and record the result in research_log.md:
+
+        pytest -m bayes_audit
+    """
+    config = B.BacktestConfig(draws=25, tune=50, chains=2)
+    cut = pd.Timestamp("2020-03-16")
+
+    baseline, _ = B.run_backtest(frame, config, models=B.BAYES_MODELS, cores=1)
+
+    corrupted = frame.copy()
+    mask = corrupted.index >= cut
+    rng = np.random.default_rng(20260826)
+    corrupted.loc[mask, "log_return"] = rng.normal(0.0, 0.5, size=int(mask.sum()))
+    corrupted.loc[mask, "parkinson_var"] = rng.uniform(0.01, 0.10, size=int(mask.sum()))
+    recomputed, _ = B.run_backtest(corrupted, config, models=B.BAYES_MODELS, cores=1)
+
+    past = baseline.index <= cut
+    pd.testing.assert_frame_equal(
+        baseline[past][FORECAST_COLUMNS], recomputed[past][FORECAST_COLUMNS],
+        check_exact=True,
+    )

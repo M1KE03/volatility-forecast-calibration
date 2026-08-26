@@ -1,8 +1,16 @@
-"""Stage 1 tests for ``src.models``: the predictive interface and the two baselines.
+"""Tests for ``src.models``, in the order the module was built.
 
-The GARCH half of the module is still stubbed; its tests arrive with Stages 2 and 3.
-What is covered here is the interface every model will pass through, which is worth
-getting right before there are four models depending on it.
+Stage 1 covers the predictive interface every model passes through and the two
+baselines; Stage 2 the shared GARCH likelihood, the MLE and the plug-in predictive;
+Stage 3 the frozen priors, the PyMC/NUTS sampler and the mixture posterior predictive.
+
+Two of these tests are load-bearing beyond their own section. The PyMC graph is checked
+against the NumPy log posterior, because "models 3 and 4 share one likelihood" is
+otherwise a claim about two implementations that nothing verifies. And the posterior
+predictive is checked from both sides -- strictly wider than the plug-in when the
+posterior is dispersed, exactly equal to it when the posterior is collapsed -- because a
+mixture built on one shared ``h_next`` would agree with the frequentist model and that
+agreement would be reported as this project's finding.
 """
 
 from __future__ import annotations
@@ -10,7 +18,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
-from scipy import stats
+from scipy import integrate, stats
 
 from src import models as M
 
@@ -685,3 +693,495 @@ def test_plugin_predictive_rejects_a_degenerate_variance() -> None:
     for bad in (0.0, -1e-8, np.nan):
         with pytest.raises(ValueError, match="finite and positive"):
             M.plugin_predictive(params, bad)
+
+
+# ===================================================================================
+# Stage 3: the priors, the sampler, and the posterior predictive
+# ===================================================================================
+
+
+def _posterior_draws(
+    n: int, *, seed: int = 0, spread: float = 1.0, theta: np.ndarray | None = None
+) -> np.ndarray:
+    """A stand-in posterior, dispersed around ``theta``.
+
+    Built here rather than sampled, so the predictive tests are about the predictive
+    rather than about the sampler, and so ``spread=0`` gives an exactly degenerate
+    posterior -- the limit in which the Bayesian model must reproduce the frequentist
+    one.
+    """
+    base = _garch_theta() if theta is None else np.asarray(theta, dtype=float)
+    if spread == 0.0:
+        return np.tile(base, (n, 1))
+    rng = np.random.default_rng(seed)
+    scales = np.array([2e-4, 4e-7, 0.02, 0.02, 1.0]) * spread
+    draws = base + rng.normal(0.0, scales, size=(n, len(base)))
+    draws[:, 1] = np.abs(draws[:, 1])
+    draws[:, 4] = np.clip(draws[:, 4], 4.5, None)
+    return draws
+
+
+# --- The priors --------------------------------------------------------------------
+
+
+def test_priors_are_the_ones_frozen_at_d4() -> None:
+    """The frozen decision, restated where a change to it would break a test.
+
+    D4 was resolved in research_log.md 1.10 **before** any Bayesian out-of-sample number
+    existed, which is the only thing that makes the project's headline claim falsifiable.
+    A later edit to any of these constants is a change to a frozen decision, and it
+    should have to argue with a test rather than slip through.
+    """
+    assert M.PRIOR_MU_SD == 1.0
+    assert M.PRIOR_OMEGA_SD == 1.0
+    assert M.PRIOR_ALPHA == (2.0, 10.0)
+    assert M.PRIOR_DELTA == (3.0, 1.0)
+    assert M.PRIOR_NU_MEAN == 10.0
+    assert M.PRIOR_NU_LOWER == 4.0
+
+
+def test_the_delta_prior_does_not_vanish_at_the_stationarity_boundary() -> None:
+    """Why D4 departed from the feasibility probe, as a property rather than a note.
+
+    The probe used ``delta ~ Beta(10, 2)``. A ``Beta(a, b)`` density vanishes at 1
+    whenever ``b > 1``, so that prior places zero density at ``alpha + beta = 1`` -- the
+    boundary research_log.md 1.9 recorded the data pressing against, with ``alpha+beta``
+    at or above 0.999 in 16 of the 102 MLE refits. This asserts the adopted prior does
+    not, and that the rejected one would have.
+    """
+    adopted = float(stats.beta.pdf(1.0, *M.PRIOR_DELTA))
+    probe = float(stats.beta.pdf(1.0, 10.0, 2.0))
+
+    assert adopted > 0.0
+    assert probe == 0.0
+
+
+def test_the_beta_prior_integrates_to_one_over_its_support() -> None:
+    """**Negative control for the change-of-variable Jacobian.**
+
+    The prior is specified over ``delta`` and ``log_prior`` states it over ``beta``, so
+    it carries a factor ``1 / (1 - alpha)``. Drop that factor and the conditional
+    density of ``beta`` integrates to ``1 - alpha`` instead of 1 -- a 20% error at
+    ``alpha = 0.2``, silently, in a function no optimiser would complain about. It would
+    matter for real on the route-B (emcee) path, where ``log_prior`` *is* the target.
+
+    Integrating the joint over ``beta`` at fixed everything else must return the joint
+    divided by exactly the ``beta`` conditional.
+    """
+    mu, omega, alpha, nu = 0.0005, 2.0e-6, 0.20, 7.0
+
+    def joint(beta: float) -> float:
+        return float(np.exp(M.log_prior(np.array([mu, omega, alpha, beta, nu]))))
+
+    integral, _ = integrate.quad(joint, 0.0, 1.0 - alpha, limit=200)
+
+    reference_beta = 0.6
+    delta = reference_beta / (1.0 - alpha)
+    conditional = float(stats.beta.pdf(delta, *M.PRIOR_DELTA)) / (1.0 - alpha)
+    expected = joint(reference_beta) / conditional
+
+    assert integral == pytest.approx(expected, rel=1e-8)
+
+
+def test_log_prior_marginals_match_an_independent_construction() -> None:
+    """The priors, restated from scipy rather than from the implementation."""
+    mu, omega, alpha, beta, nu = 0.0005, 2.0e-6, 0.20, 0.60, 7.0
+    delta = beta / (1.0 - alpha)
+
+    expected = (
+        stats.norm.logpdf(mu, 0.0, M.PRIOR_MU_SD)
+        + stats.halfnorm.logpdf(omega, 0.0, M.PRIOR_OMEGA_SD)
+        + stats.beta.logpdf(alpha, *M.PRIOR_ALPHA)
+        + stats.beta.logpdf(delta, *M.PRIOR_DELTA)
+        - np.log(1.0 - alpha)
+        + stats.expon.logpdf(nu, loc=M.PRIOR_NU_LOWER, scale=M.PRIOR_NU_MEAN)
+    )
+
+    got = M.log_prior(np.array([mu, omega, alpha, beta, nu]))
+    assert got == pytest.approx(float(expected), rel=1e-12)
+
+
+@pytest.mark.parametrize(
+    "theta",
+    [
+        np.array([0.0, -1e-6, 0.1, 0.8, 7.0]),  # omega <= 0
+        np.array([0.0, 1e-6, -0.01, 0.8, 7.0]),  # alpha < 0
+        np.array([0.0, 1e-6, 0.3, 0.75, 7.0]),  # alpha + beta >= 1
+        np.array([0.0, 1e-6, 0.1, 0.8, 3.9]),  # nu <= 4
+        np.array([np.nan, 1e-6, 0.1, 0.8, 7.0]),  # not finite
+    ],
+)
+def test_log_prior_returns_minus_inf_outside_the_support(theta) -> None:
+    """Support is enforced by the parameterisation, and stated here as a hard edge.
+
+    Every constraint the model specification names -- positivity, stationarity, finite
+    kurtosis -- has to be unreachable, not merely improbable. Returning ``-inf`` rather
+    than raising is what lets one function serve an optimiser and a sampler alike.
+    """
+    assert M.log_prior(theta) == -np.inf
+
+
+def test_log_posterior_is_the_prior_plus_the_shared_likelihood() -> None:
+    """Models 3 and 4 differ only in what is done with one likelihood.
+
+    Not a restatement of the implementation: the point is that the *shared*
+    ``garch11_t_loglik`` is the term that appears, so the Bayesian model cannot drift
+    onto a likelihood of its own.
+    """
+    # Percent scale, where D4 froze the priors and where the sampler works.
+    theta = np.array([0.05, 0.05, 0.10, 0.85, 7.0])
+    returns = _simulate_garch_t(300, theta, seed=3)
+    h0 = float(np.var(returns, ddof=1))
+
+    expected = M.log_prior(theta) + M.garch11_t_loglik(theta, returns, h0)
+    assert M.log_posterior(theta, returns, h0) == pytest.approx(expected, rel=1e-12)
+
+
+def test_log_posterior_never_evaluates_the_likelihood_outside_the_support() -> None:
+    inadmissible = np.array([0.0, 1e-6, 0.3, 0.75, 7.0])
+    returns = _simulate_garch_t(200, _garch_theta(), seed=4)
+    assert M.log_posterior(inadmissible, returns, 1e-4) == -np.inf
+
+
+# --- The PyMC model graph ----------------------------------------------------------
+
+
+def test_the_pymc_graph_and_the_numpy_log_posterior_agree() -> None:
+    """**The load-bearing cross-check of Stage 3.**
+
+    The project's central design constraint is that models 3 and 4 share one likelihood.
+    PyMC does not call ``garch11_t_loglik``; it builds its own graph, so that constraint
+    is a claim about two implementations rather than about one function -- unless it is
+    checked. Two things could break it silently: a variance recursion indexed
+    differently from ``garch11_filter``, and a Student-t parameterised by scale where
+    the NumPy version uses variance. Either would produce a posterior that samples
+    cleanly, converges, and answers a different question.
+
+    The two are compared **without** PyMC's transform Jacobians, since ``log_prior``
+    states a density in the natural parameterisation. What remains is the deliberate
+    ``log(1 - alpha)``: PyMC evaluates the prior over ``delta``, this module states it
+    over ``beta``.
+    """
+    pt = pytest.importorskip("pytensor.tensor")
+
+    theta = np.array([0.05, 0.05, 0.10, 0.85, 7.0])  # percent scale, as D4 specifies
+    returns = _simulate_garch_t(400, theta, seed=11)
+    h0 = float(np.var(returns, ddof=1))
+
+    model = M._build_pymc_model(returns, h0)
+    named = dict(zip(M.PARAM_NAMES, theta))
+    named["delta"] = named["beta"] / (1.0 - named["alpha"])
+
+    point = {}
+    for rv in model.free_RVs:
+        value_var = model.rvs_to_values[rv]
+        transform = model.rvs_to_transforms.get(rv)
+        x = np.asarray(named[rv.name], dtype=float)
+        if transform is not None:
+            x = transform.forward(pt.as_tensor_variable(x), *rv.owner.inputs).eval()
+        point[value_var.name] = np.asarray(x, dtype=float)
+
+    pymc_logp = float(model.compile_logp(jacobian=False)(point))
+    numpy_logp = M.log_posterior(theta, returns, h0)
+
+    assert pymc_logp - numpy_logp == pytest.approx(float(np.log(1.0 - theta[2])), abs=1e-6)
+
+
+# --- The sampler -------------------------------------------------------------------
+
+
+def test_bayes_convergence_thresholds_are_the_ones_frozen_at_d19() -> None:
+    """Fixed before any refit ran. A threshold loosened after it fires is not one."""
+    assert M.BAYES_CONVERGENCE["max_r_hat"] == 1.01
+    assert M.BAYES_CONVERGENCE["max_divergences"] == 0
+    assert M.BAYES_CONVERGENCE["min_ess_tail"] == 400.0
+
+
+@pytest.mark.slow
+def test_sampler_recovers_known_parameters_from_simulated_data() -> None:
+    """The Bayesian analogue of the MLE recovery test, and on the same data-generating
+    process written out independently of ``src``.
+
+    Loose tolerances on purpose: 1,500 observations do not identify ``nu`` sharply, and
+    a test that demanded they did would be testing the seed. What it must catch is a
+    posterior in the wrong place -- which is what a mis-indexed recursion produces.
+    """
+    theta = _garch_theta(mu=0.0005, omega=2.0e-6, alpha=0.10, beta=0.85, nu=7.0)
+    returns = _simulate_garch_t(1500, theta, seed=7)
+
+    fit = M.sample_garch_posterior(
+        returns, draws=500, tune=500, chains=4, thin=1, seed=0, cores=1
+    )
+
+    assert fit.converged, fit.message
+    posterior_mean = fit.draws.mean(axis=0)
+    assert posterior_mean[2] == pytest.approx(0.10, abs=0.06)  # alpha
+    assert posterior_mean[3] == pytest.approx(0.85, abs=0.10)  # beta
+    assert 4.0 < posterior_mean[4] < 20.0  # nu
+    # Raw return scale on the way out, not the percent scale it sampled on.
+    assert posterior_mean[1] < 1e-4  # omega
+    assert abs(posterior_mean[0]) < 0.01  # mu
+
+
+@pytest.mark.slow
+def test_sampler_is_reproducible_bit_for_bit_under_one_seed() -> None:
+    """A refit that cannot be reproduced cannot be audited."""
+    returns = _simulate_garch_t(400, _garch_theta(), seed=8)
+    kwargs = dict(draws=150, tune=150, chains=2, thin=1, seed=42, cores=1)
+
+    first = M.sample_garch_posterior(returns, **kwargs)
+    second = M.sample_garch_posterior(returns, **kwargs)
+
+    np.testing.assert_array_equal(first.draws, second.draws)
+    np.testing.assert_array_equal(first.log_prob, second.log_prob)
+    assert first.n_divergences == second.n_divergences
+
+
+@pytest.mark.slow
+def test_a_fit_that_fails_its_diagnostics_says_so_rather_than_raising() -> None:
+    """D19's failure path, forced rather than waited for.
+
+    Behaviour under a failed fit must not depend on whether the real data happens to
+    trigger one. A chain far too short to resolve the tails fails ``min_ess_tail``; the
+    fit comes back with ``converged=False`` and a message naming the threshold and the
+    parameter, and the backtest then produces no forecasts for that block. Nothing is
+    re-run under a different seed in the hope of a better verdict.
+    """
+    returns = _simulate_garch_t(400, _garch_theta(), seed=9)
+
+    fit = M.sample_garch_posterior(
+        returns, draws=60, tune=100, chains=2, thin=1, seed=0, cores=1
+    )
+
+    assert not fit.converged
+    assert "ess_tail" in fit.message
+    assert fit.draws.shape == (120, len(M.PARAM_NAMES))  # the draws survive the verdict
+
+
+@pytest.mark.slow
+def test_thinning_is_deterministic_and_keeps_every_nth_draw() -> None:
+    """D18 thins by taking every second draw, not a random subsample."""
+    returns = _simulate_garch_t(300, _garch_theta(), seed=10)
+    kwargs = dict(draws=100, tune=100, chains=2, seed=1, cores=1)
+
+    full = M.sample_garch_posterior(returns, thin=1, **kwargs)
+    thinned = M.sample_garch_posterior(returns, thin=2, **kwargs)
+
+    assert full.draws.shape[0] == 200
+    assert thinned.draws.shape[0] == 100
+    np.testing.assert_array_equal(thinned.draws, full.draws[::2])
+
+
+def test_sampler_rejects_a_window_too_short_to_identify_the_model() -> None:
+    with pytest.raises(ValueError, match="at least 30"):
+        M.sample_garch_posterior(np.zeros(10) + 0.001)
+
+
+# --- The posterior predictive ------------------------------------------------------
+
+
+def test_posterior_predictive_refuses_one_shared_h_next() -> None:
+    """**The single most dangerous bug in this codebase, made unreachable.**
+
+    Each posterior draw implies its own filtered variance path and therefore its own
+    ``h_next``. Passing one shared value -- the variance at the posterior mean, say --
+    discards most of the parameter uncertainty and collapses this predictive towards the
+    plug-in. Nothing would fail. The Bayesian and frequentist intervals would simply
+    agree, and that agreement would be reported as the project's finding.
+
+    So the shape is a contract, not a convention.
+    """
+    draws = _posterior_draws(200)
+    levels = np.array([0.05, 0.95])
+
+    for wrong in (np.array([1.2e-4]), np.full((200, 1), 1.2e-4), np.full(199, 1.2e-4)):
+        with pytest.raises(ValueError, match="one variance per posterior draw"):
+            M.posterior_predictive(draws, wrong, levels)
+
+
+def test_a_posterior_collapsed_to_a_point_reproduces_the_plug_in() -> None:
+    """The no-parameter-uncertainty limit, where the two models must coincide exactly.
+
+    The other half of the guard above. If the mixture did not reduce to the plug-in when
+    the posterior is degenerate, any interval difference measured later would be part
+    mechanism and part arithmetic error, and there would be no way to tell which.
+    """
+    theta = _garch_theta(nu=6.0)
+    h_next = 1.2e-4
+    levels = np.array([0.005, 0.05, 0.5, 0.95, 0.995])
+
+    draws = _posterior_draws(300, spread=0.0, theta=theta)
+    mean, quantiles = M.posterior_predictive(draws, np.full(300, h_next), levels)
+
+    plug_in = M.plugin_predictive(M.GarchParams.from_array(theta), h_next)
+    np.testing.assert_allclose(quantiles, plug_in.quantile(levels), rtol=1e-10)
+    assert mean == pytest.approx(theta[0], rel=1e-12)
+
+
+def test_a_dispersed_posterior_is_wider_than_the_plug_in_where_it_matters() -> None:
+    """**The project's research question, as an assertion -- and only where it holds.**
+
+    Integrating over parameter uncertainty must widen the predictive relative to
+    conditioning on a point estimate. If this ever fails at 95% or 99%, the mixture is
+    not carrying parameter uncertainty and every downstream coverage number is measuring
+    plumbing rather than statistics.
+
+    **Not at 90%,** and that is not a weakened assertion. A scale mixture holding average
+    variance fixed is leptokurtic against the single distribution at that average: more
+    peaked in the middle, heavier in the tails, crossing over somewhere between 90% and
+    95% for dispersions of this size. Asserting "wider at every level" would be
+    asserting something false, and code changed until it passed would be broken code.
+    Measured and recorded in research_log.md 1.11 and problems-and-solutions 38; the
+    companion test below pins the crossover itself.
+    """
+    theta = _garch_theta(nu=6.0)
+    draws = _posterior_draws(2000, seed=1, spread=1.0, theta=theta)
+    rng = np.random.default_rng(2)
+    h_next_by_draw = 1.2e-4 * np.exp(rng.normal(0.0, 0.25, size=2000))
+
+    predictive = M.mixture_predictive(draws, h_next_by_draw)
+    plug_in = M.plugin_predictive(
+        M.GarchParams.from_array(draws.mean(axis=0)), float(h_next_by_draw.mean())
+    )
+
+    for level in (0.95, 0.99):
+        probs = np.array([0.5 - level / 2.0, 0.5 + level / 2.0])
+        mixture_width = float(np.diff(predictive.quantile(probs))[0])
+        plug_in_width = float(np.diff(plug_in.quantile(probs))[0])
+        assert mixture_width > plug_in_width, f"not wider at the {level:.0%} level"
+
+
+def test_the_mixture_is_more_peaked_in_the_middle_than_the_plug_in() -> None:
+    """The other side of leptokurtosis, pinned so it is not later read as a bug.
+
+    The handoff's Stage 3 sanity check says Bayesian intervals should come out wider and
+    to hunt for a bug if they do not. That is right at 99% and wrong at 90%: the same
+    mixing that fattens the tails thins the shoulders, because the total variance is
+    conserved. Anyone who meets a narrower 90% interval downstream should meet this test
+    rather than start debugging.
+    """
+    theta = _garch_theta(nu=6.0)
+    draws = _posterior_draws(2000, seed=1, spread=1.0, theta=theta)
+    rng = np.random.default_rng(2)
+    h_next_by_draw = 1.2e-4 * np.exp(rng.normal(0.0, 0.25, size=2000))
+
+    predictive = M.mixture_predictive(draws, h_next_by_draw)
+    plug_in = M.plugin_predictive(
+        M.GarchParams.from_array(draws.mean(axis=0)), float(h_next_by_draw.mean())
+    )
+
+    probs = np.array([0.05, 0.95])
+    assert float(np.diff(predictive.quantile(probs))[0]) < float(
+        np.diff(plug_in.quantile(probs))[0]
+    )
+
+
+def test_mixture_quantiles_match_a_monte_carlo_draw_from_the_same_mixture() -> None:
+    """**Independent check on the numerical quantile solve.**
+
+    The mixture CDF is inverted by bracketing between the smallest and largest component
+    quantiles. That bracket is provably valid, but "provably" is what every wrong
+    implementation also believes, so the answer is checked against sampling from the
+    mixture directly -- draw a component, then draw its innovation -- which shares no
+    code with the solve.
+    """
+    theta = _garch_theta(nu=6.0)
+    n = 1000
+    draws = _posterior_draws(n, seed=1, spread=1.0, theta=theta)
+    rng = np.random.default_rng(2)
+    h_next_by_draw = 1.2e-4 * np.exp(rng.normal(0.0, 0.25, size=n))
+    predictive = M.mixture_predictive(draws, h_next_by_draw)
+
+    mc = np.random.default_rng(99)
+    index = mc.integers(0, n, size=500_000)
+    nus = draws[index, 4]
+    scales = np.sqrt(h_next_by_draw[index]) * np.sqrt((nus - 2.0) / nus)
+    sample = draws[index, 0] + scales * mc.standard_t(nus)
+
+    probs = np.array([0.05, 0.5, 0.95, 0.99])
+    np.testing.assert_allclose(
+        predictive.quantile(probs), np.quantile(sample, probs), rtol=0.0, atol=5e-4
+    )
+
+
+def test_parameter_uncertainty_bites_hardest_in_the_tails() -> None:
+    """The mechanism behind the expected Stage 4 result, checked at the source.
+
+    Widening is not uniform across levels: the further into the tail, the more the
+    spread of ``h_next`` and ``nu`` across draws matters. That is why this project
+    expects its finding at 99% rather than at 90%, and it should be a property of the
+    predictive rather than an assertion in the write-up.
+    """
+    theta = _garch_theta(nu=6.0)
+    draws = _posterior_draws(2000, seed=3, spread=1.0, theta=theta)
+    rng = np.random.default_rng(4)
+    h_next_by_draw = 1.2e-4 * np.exp(rng.normal(0.0, 0.25, size=2000))
+
+    predictive = M.mixture_predictive(draws, h_next_by_draw)
+    plug_in = M.plugin_predictive(
+        M.GarchParams.from_array(draws.mean(axis=0)), float(h_next_by_draw.mean())
+    )
+
+    def ratio(level: float) -> float:
+        probs = np.array([0.5 - level / 2.0, 0.5 + level / 2.0])
+        return float(
+            np.diff(predictive.quantile(probs))[0] / np.diff(plug_in.quantile(probs))[0]
+        )
+
+    assert ratio(0.99) > ratio(0.90)
+
+
+def test_mixture_cdf_is_the_average_of_its_components() -> None:
+    """Equal weights, restated from scipy rather than from the implementation."""
+    draws = _posterior_draws(50, seed=5)
+    h_next_by_draw = np.full(50, 1.2e-4) * np.linspace(0.8, 1.2, 50)
+    predictive = M.mixture_predictive(draws, h_next_by_draw)
+
+    r = -0.02
+    expected = np.mean(
+        [
+            M.StudentTPredictive(mean=m, variance=v, nu=nu).cdf(r)
+            for m, v, nu in zip(draws[:, 0], h_next_by_draw, draws[:, 4])
+        ]
+    )
+    assert predictive.cdf(r) == pytest.approx(float(expected), rel=1e-12)
+
+
+def test_mixture_cdf_inverts_its_own_quantiles() -> None:
+    """The PIT and the interval bounds come from one object; they must agree."""
+    draws = _posterior_draws(300, seed=6)
+    h_next_by_draw = 1.2e-4 * np.linspace(0.7, 1.4, 300)
+    predictive = M.mixture_predictive(draws, h_next_by_draw)
+
+    for p in (0.005, 0.05, 0.5, 0.95, 0.995):
+        x = float(predictive.quantile(np.array([p]))[0])
+        assert predictive.cdf(x) == pytest.approx(p, abs=1e-10)
+
+
+def test_mixture_mean_is_the_posterior_mean_of_mu() -> None:
+    draws = _posterior_draws(400, seed=7)
+    predictive = M.mixture_predictive(draws, np.full(400, 1.2e-4))
+    assert predictive.mean == pytest.approx(float(draws[:, 0].mean()), rel=1e-12)
+
+
+def test_mixture_rejects_degenerate_components() -> None:
+    """One bad draw must not be averaged into a plausible-looking answer."""
+    with pytest.raises(ValueError, match="finite and positive"):
+        M.StudentTMixturePredictive(
+            means=np.zeros(3), variances=np.array([1e-4, 0.0, 1e-4]), nus=np.full(3, 6.0)
+        )
+    with pytest.raises(ValueError, match="greater than 2"):
+        M.StudentTMixturePredictive(
+            means=np.zeros(3), variances=np.full(3, 1e-4), nus=np.array([6.0, 1.5, 6.0])
+        )
+    with pytest.raises(ValueError, match="same shape"):
+        M.StudentTMixturePredictive(
+            means=np.zeros(3), variances=np.full(2, 1e-4), nus=np.full(3, 6.0)
+        )
+
+
+def test_posterior_predictive_rejects_a_draw_matrix_of_the_wrong_width() -> None:
+    with pytest.raises(ValueError, match="shape"):
+        M.posterior_predictive(
+            np.zeros((10, 4)), np.full(10, 1e-4), np.array([0.05, 0.95])
+        )

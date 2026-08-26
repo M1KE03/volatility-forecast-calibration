@@ -1,10 +1,10 @@
 # Trusting the Error Bars: Calibration of Frequentist vs Bayesian Volatility Forecasts
 
-**Status: Stage 2 complete. Three of the four forecasters exist — both baselines and the
-frequentist GARCH(1,1)-t — plus the GARCH-normal ablation, each with a complete forecast
-table over the 2,134-day evaluation window. The look-ahead audit passes with the GARCH
-models in the loop. The Bayesian model is next: `sample_garch_posterior` and
-`posterior_predictive` are stubs, as are all of `evaluation.py` and `bootstrap.py`.**
+**Status: Stage 3 complete. All four forecasters exist — both baselines, the frequentist
+GARCH(1,1)-t and the Bayesian GARCH(1,1)-t — plus the GARCH-normal ablation, each with a
+forecast table over the 2,134-day evaluation window. The Bayesian model is fitted by NUTS
+at each of the 102 refit dates, 100 of which converged. The look-ahead audit covers both
+estimators. `evaluation.py` and `bootstrap.py` are still stubs and are next.**
 
 Stage numbers follow [`docs/project1-implementation-plan.md`](docs/project1-implementation-plan.md),
 the governing plan.
@@ -28,10 +28,22 @@ calibration.
 | 1 | Yesterday's volatility | `yesterday` | Naive baseline | built |
 | 2 | EWMA / RiskMetrics | `ewma` | Industry baseline | built |
 | 3 | GARCH(1,1)-t, frequentist MLE | `garch_mle` | Plug-in predictive | built |
-| 4 | GARCH(1,1)-t, Bayesian | `garch_bayes` | Posterior predictive | Stage 3 |
+| 4 | GARCH(1,1)-t, Bayesian | `garch_bayes` | Posterior predictive | built |
 
-Models 3 and 4 share one log-likelihood implementation (`src/models.py`), so that
-"the same underlying likelihood" is a property of the code rather than a claim.
+Models 3 and 4 share one log-likelihood implementation (`src/models.py`), so that "the
+same underlying likelihood" is a property of the code rather than a claim — and since
+Stage 3 a property that is checked, because PyMC builds its own graph rather than calling
+that implementation, and a test requires the two to agree at a fixed parameter vector.
+
+**What that does and does not license.** The two models differ in the *estimator*, not in
+the model. It does **not** follow that the difference between their intervals is
+parameter uncertainty, and an earlier version of this README said it did. The frequentist
+predictive sits at the maximum of the likelihood; the Bayesian one integrates a posterior
+that the priors have moved off that maximum. Measured on a COVID-period refit at the 99%
+level, parameter uncertainty widens the interval by 0.5% and the priors narrow it by 4.5%
+— nine parts prior to one part parameter uncertainty, pointing opposite ways. The
+mechanism, the numbers and what the evaluation layer must do about it are in
+`research_log.md` §1.13; the trap is problems-and-solutions #41.
 
 A fifth track, `garch_mle_normal`, is carried through the same backtest. It is the
 **Stage 6 ablation** — normal versus Student-t innovations, the cheap and decisive lever
@@ -95,7 +107,9 @@ are kept distinct in code and in the report:
 - **Predictive interval** -- a two-sided interval for the *return*, not for the variance.
 - **VaR forecast** -- a one-sided lower quantile of the return distribution.
 - **Parameter uncertainty** -- uncertainty about GARCH coefficients. Present in the
-  Bayesian posterior predictive; absent from the frequentist plug-in.
+  Bayesian posterior predictive; absent from the frequentist plug-in. **Not** the same
+  thing as the difference between the two models' intervals, which also contains the
+  priors' effect on the point estimate (see above).
 - **Innovation uncertainty** -- uncertainty from the Student-t shock. Present in both.
 
 ### Known caveat: Parkinson is not on the forecast target's scale
@@ -142,13 +156,23 @@ SHA-256, and why this replaced the earlier compiler-free design are in `research
 python run_all.py --help            # list pipeline stages
 python run_all.py --stage data      # build the analysis frame (implemented)
 python run_all.py --stage eda       # ARCH-LM, Ljung-Box, ADF + Stage 0 figures (implemented)
-python run_all.py --stage backtest  # walk-forward loop, baselines + GARCH (implemented)
+python run_all.py --stage backtest  # walk-forward loop, baselines + MLE GARCH (~1 min)
+python run_all.py --stage bayes     # the Bayesian track, 102 NUTS fits (~95 min)
 python run_all.py --all             # run the full pipeline
 ```
 
-`--stage backtest` takes about a minute: it refits GARCH at each of the 102 refit dates
-for both innovation distributions, 204 maximum-likelihood fits in total. Every other
-implemented stage is near-instant.
+**The backtest is two stages, for cost rather than design.** `--stage backtest` refits
+GARCH at each of the 102 refit dates for both innovation distributions -- 306
+maximum-likelihood fits, about a minute. `--stage bayes` runs the same walk-forward loop
+over the same refit dates with NUTS, which takes about ninety-five. Each writes its own
+partial tables and rebuilds the merged `forecasts.csv` from whichever partials are on
+disk, so re-running the cheap track never re-runs the expensive one and the evaluation
+layer still reads one table. The merge compares the two configurations and refuses to
+join runs made under different ones.
+
+A Bayesian refit that fails its convergence diagnostics produces no forecasts for the 21
+days it serves, and those days stay NaN rather than being filled from the previous
+window. Two of the 102 did, so `garch_bayes` has 2,092 of the 2,134 rows.
 
 `--stage data` uses the committed snapshot in `data/raw/` and makes no network call;
 pass `--refresh` to re-download, which deliberately replaces that snapshot. It prints the
@@ -206,9 +230,21 @@ estimated something the audit could not have caught a refit trained on data it s
 not have seen. Every route by which the future could reach a forecast is now inside its
 scope: the estimation window, the backcast seed, and the daily filter.
 
+Since Stage 3 the Bayesian track is audited too, under the same corruption dates and the
+same claim, but against a **recording stub** in place of NUTS. That is not a concession.
+A Bayesian refit costs 9-17 seconds before it draws anything, because the floor is
+compiling the gradient of the variance recursion, so a real-sampler audit would put a
+default `pytest` near two hours -- and an audit that slow gets skipped, which is the cut
+the never-cut list exists to prevent. Every look-ahead surface still runs in the real code
+path at all 102 refit dates, and the stub additionally records the exact array each fit
+was handed, so "no fit saw data from on or after its own refit date" becomes an assertion
+on the sampler's input rather than an inference from its output. The real sampler is
+audited end to end behind an opt-in flag.
+
 ```bash
-pytest -q                      # everything, including the audit (~10 min)
-pytest -m "not slow" -q        # inner loop; skips the corrupted re-runs (~1 min)
+pytest -q                              # everything, including both audits (~18 min)
+pytest -m "not slow" -q                # inner loop (~2 min)
+pytest --bayes-audit -m bayes_audit    # the audit with NUTS itself (~40 min)
 ```
 
 The `slow` marker covers the 15 tests that each need their *own* backtest run: the
@@ -302,7 +338,8 @@ and never reaches the analysis frame (decision D8 in `research_log.md`).
 .
 ├── README.md
 ├── requirements.txt
-├── pytest.ini             # registers the `slow` marker
+├── conftest.py            # the --bayes-audit opt-in gate
+├── pytest.ini             # registers the `slow` and `bayes_audit` markers
 ├── run_all.py             # single entry point
 ├── research_log.md        # decision register + changelog
 ├── docs/
@@ -315,8 +352,8 @@ and never reaches the analysis frame (decision D8 in `research_log.md`).
 ├── src/
 │   ├── data.py            # download, caching, returns, proxy, regimes
 │   ├── eda.py             # ARCH-LM, Ljung-Box, ADF, ACF
-│   ├── models.py          # shared likelihood, MLE, MCMC, baselines
-│   ├── backtest.py        # walk-forward loop, refit schedule, daily filter
+│   ├── models.py          # shared likelihood, MLE, priors, NUTS, predictives
+│   ├── backtest.py        # walk-forward loop, refit schedule, two tracks, merge
 │   ├── figures.py         # house style, all figures
 │   ├── evaluation.py      # losses, coverage tests, DM        (stubs)
 │   └── bootstrap.py       # stationary block bootstrap        (stubs)
