@@ -635,6 +635,13 @@ def test_the_model_registry_is_internally_consistent() -> None:
     assert set().union(*B.TRACKS.values()) == set(B.MODELS), (
         "every model must belong to a track, or a stage will silently never build it"
     )
+    assert B.BAYES_MEAN_MODEL not in B.HEADLINE_MODELS, (
+        "the posterior-mean plug-in splits a comparison; it does not enter one"
+    )
+    assert set(B.PLUGIN_MODELS) < set(B.MODELS)
+    assert B.BAYES_MODEL not in B.PLUGIN_MODELS, (
+        "the mixture predictive must never be treated as a plug-in"
+    )
     assert "garch_mle_normal" not in B.HEADLINE_MODELS, (
         "the ablation must not appear in the headline comparison"
     )
@@ -982,3 +989,102 @@ def test_bayesian_look_ahead_with_the_real_sampler(frame: pd.DataFrame) -> None:
         baseline[past][FORECAST_COLUMNS], recomputed[past][FORECAST_COLUMNS],
         check_exact=True,
     )
+
+
+# --- The posterior-mean plug-in, and the decomposition it exists for ----------------
+
+
+def test_the_posterior_mean_track_is_an_ablation_not_a_competitor() -> None:
+    """``garch_bayes_mean`` splits a comparison; it does not enter one.
+
+    It is the plug-in at the same point estimate ``garch_bayes`` integrates over, so
+    putting it in the headline table would show the reader two rows that differ by a
+    quantity the report is trying to *measure* rather than by a modelling choice anyone
+    would make.
+    """
+    assert B.BAYES_MEAN_MODEL in B.MODELS
+    assert B.BAYES_MEAN_MODEL in B.BAYES_MODELS
+    assert B.BAYES_MEAN_MODEL not in B.HEADLINE_MODELS
+    # It is a plug-in: same treatment of a point estimate as the MLE models get.
+    assert B.BAYES_MEAN_MODEL in B.PLUGIN_MODELS
+    assert B.BAYES_MODEL not in B.PLUGIN_MODELS
+
+
+def test_the_posterior_mean_track_gets_a_plug_in_and_the_mixture_track_cannot() -> None:
+    """**The substitution that would report parameter uncertainty as zero.**
+
+    ``garch_bayes`` must never fall back on a plug-in built from its own summary
+    statistics. If it did, it would equal ``garch_bayes_mean`` by construction, their
+    difference would be exactly zero, and the project would conclude that integrating
+    over the posterior changes nothing -- from a bug, not from the data.
+    """
+    plug_in = B._predictive(B.BAYES_MEAN_MODEL, 1.2e-4, 0.0005, 6.0)
+    assert isinstance(plug_in, M.StudentTPredictive)
+
+    with pytest.raises(ValueError, match="cannot be rebuilt"):
+        B._predictive(B.BAYES_MODEL, 1.2e-4, 0.0005, 6.0)
+
+
+@pytest.mark.slow
+def test_the_two_bayesian_tracks_come_from_the_same_fits(
+    frame: pd.DataFrame, monkeypatch
+) -> None:
+    """One posterior, two things done with it -- so they stand or fall together.
+
+    Same refit dates, same failed blocks, same point estimate. If the two tracks could
+    disagree about which days have a forecast, their difference would be taken over an
+    unstated and shifting sample.
+    """
+    _install_recording_stub(monkeypatch)
+    forecasts, records = B.run_backtest(frame, models=B.BAYES_MODELS)
+
+    bayes = forecasts[forecasts.model == B.BAYES_MODEL]
+    mean = forecasts[forecasts.model == B.BAYES_MEAN_MODEL]
+
+    assert bayes.index.equals(mean.index)
+    np.testing.assert_array_equal(
+        bayes["variance"].isna().to_numpy(), mean["variance"].isna().to_numpy()
+    )
+    # The predictive mean is the same point estimate in both.
+    np.testing.assert_allclose(
+        bayes["mean"].to_numpy(), mean["mean"].to_numpy(), rtol=1e-12
+    )
+    # One record per refit, not one per model: both rest on a single fit.
+    assert len(records) == 102
+    assert set(r.model for r in records) == {B.BAYES_MODEL}
+
+
+@pytest.mark.slow
+def test_integrating_the_posterior_widens_the_tail_against_its_own_plug_in(
+    frame: pd.DataFrame, monkeypatch
+) -> None:
+    """**The project's research question, isolated at last.**
+
+    ``garch_bayes`` against ``garch_mle`` is confounded: the priors move the point
+    estimate as well, and by more (research_log.md 1.13). Against ``garch_bayes_mean``
+    the point estimate is held fixed and the *only* remaining difference is whether the
+    posterior is integrated over. At the 99% level that must widen the interval.
+
+    Run against the stub, whose draws are dispersed by construction, so this tests the
+    plumbing that isolates the effect rather than the size of the effect in the data --
+    which is a result, not an invariant, and belongs in the evaluation layer.
+    """
+    _install_recording_stub(monkeypatch)
+    forecasts, _ = B.run_backtest(frame, models=B.BAYES_MODELS)
+
+    bayes = forecasts[forecasts.model == B.BAYES_MODEL]
+    mean = forecasts[forecasts.model == B.BAYES_MEAN_MODEL]
+    finite = bayes["variance"].notna().to_numpy()
+    assert finite.sum() > 2000, "the comparison must not rest on a handful of days"
+
+    width_99 = (bayes["hi_99"] - bayes["lo_99"]).to_numpy()[finite]
+    plug_in_99 = (mean["hi_99"] - mean["lo_99"]).to_numpy()[finite]
+    assert np.all(width_99 > plug_in_99), (
+        "integrating over the posterior must widen the 99% interval on every day"
+    )
+
+    # And the crossover recorded at research_log.md 1.11 shows up here too: the same
+    # mixing that fattens the tails thins the shoulders.
+    width_90 = (bayes["hi_90"] - bayes["lo_90"]).to_numpy()[finite]
+    plug_in_90 = (mean["hi_90"] - mean["lo_90"]).to_numpy()[finite]
+    assert np.mean(width_90 / plug_in_90) < np.mean(width_99 / plug_in_99)

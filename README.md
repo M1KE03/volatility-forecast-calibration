@@ -39,17 +39,35 @@ that implementation, and a test requires the two to agree at a fixed parameter v
 the model. It does **not** follow that the difference between their intervals is
 parameter uncertainty, and an earlier version of this README said it did. The frequentist
 predictive sits at the maximum of the likelihood; the Bayesian one integrates a posterior
-that the priors have moved off that maximum. Measured on a COVID-period refit at the 99%
-level, parameter uncertainty widens the interval by 0.5% and the priors narrow it by 4.5%
-— nine parts prior to one part parameter uncertainty, pointing opposite ways. The
-mechanism, the numbers and what the evaluation layer must do about it are in
-`research_log.md` §1.13; the trap is problems-and-solutions #41.
+that the priors have moved off that maximum. Measured over the full evaluation window at the
+99% level, parameter uncertainty widens the interval by 0.3% and the priors narrow it by
+1.9% — pointing opposite ways, with the priors roughly six times the larger. And the
+regime dependence is entirely the priors: parameter uncertainty's contribution is flat
+across calm, normal and stressed days to within four parts in ten thousand. The mechanism
+and the numbers are in `research_log.md` §1.13-1.14; the trap is
+problems-and-solutions #41. The `garch_bayes_mean` track below exists to keep the two
+apart.
 
-A fifth track, `garch_mle_normal`, is carried through the same backtest. It is the
-**Stage 6 ablation** — normal versus Student-t innovations, the cheap and decisive lever
-on 99% tail coverage — and not a competitor: `backtest.HEADLINE_MODELS` excludes it and
-the evaluation layer filters on that tuple. It is fitted now because doing so costs five
-seconds per full run and saves re-entering the walk-forward loop later.
+Two further tracks are carried through the same backtest, and neither is a competitor.
+`backtest.HEADLINE_MODELS` excludes both and the evaluation layer filters on that tuple.
+
+`garch_mle_normal` is the **Stage 6 ablation** — normal versus Student-t innovations, the
+cheap and decisive lever on 99% tail coverage. It is fitted now because doing so costs
+five seconds per full run and saves re-entering the walk-forward loop later.
+
+`garch_bayes_mean` is the **plug-in predictive at the posterior mean**, and it exists
+because of the confound described above. It holds the point estimate fixed at what the
+Bayesian model uses, so the only thing separating it from `garch_bayes` is whether the
+posterior is integrated over:
+
+| comparison | isolates |
+|---|---|
+| `garch_bayes` vs `garch_bayes_mean` | parameter uncertainty, and nothing else |
+| `garch_bayes_mean` vs `garch_mle` | the priors' effect on the point estimate |
+
+It costs no sampling — it reuses the posterior each refit already produced — and it is
+built inside the same loop rather than from the persisted posterior means, so the two
+tracks cannot fall out of step.
 
 ## Locked design decisions
 

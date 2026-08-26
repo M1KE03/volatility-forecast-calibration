@@ -883,6 +883,117 @@ is, not a fifth competitor, and would stay out of the headline table.
 
 ---
 
+### 1.14 The posterior-mean plug-in track (2026-08-26)
+
+**D27 -- `garch_bayes_mean` joins the backtest as an ablation.** 1.13 recorded it as
+recommended and left it open; it is now built, on the reasoning 1.13 gives. The
+comparison this project rests on had two causes, and this track separates them:
+
+    garch_bayes / garch_bayes_mean   -- parameter uncertainty, and nothing else
+    garch_bayes_mean / garch_mle     -- the priors, and nothing else
+
+It is the plug-in predictive at the posterior mean: the same point estimate
+`garch_bayes` integrates over, conditioned on as though it were the truth, exactly as
+`garch_mle` conditions on the maximum likelihood estimate. **An ablation in the sense
+`garch_mle_normal` is**, kept out of `HEADLINE_MODELS` for the same reason -- it differs
+from `garch_bayes` by a quantity the report is trying to measure rather than by a
+modelling choice anyone would make.
+
+**Built inside `build_bayes_paths` rather than from the persisted posterior means.** The
+means for all 102 refits sit in `refit_records.csv` and the track could have been derived
+from them without re-running anything, which is why 1.13 called it nearly free. It was
+not done that way. The two tracks have to come from the *same* posterior for their
+difference to isolate parameter uncertainty, and a version that read a separate file
+would keep working after the two fell out of step -- silently, and in a way no test
+downstream could see. The cost of doing it properly is one extra `garch11_filter` pass
+per refit and a re-run of the stage.
+
+Its `variance` is `h` filtered **at** the posterior mean, while `garch_bayes`'s is the
+**mean of** `h` across draws. Those differ by Jensen's inequality and are meant to: one
+is a plug-in, the other a posterior expectation. A failed refit blanks both tracks, since
+a posterior not worth integrating is not worth averaging either.
+
+**The re-run doubles as the reproducibility check the project owed.** Determinism under a
+fixed seed is tested at 150 draws on simulated data; it had never been demonstrated on
+the production configuration. Re-running the stage with unchanged seeds and settings
+recomputes all 102 posteriors, so `garch_bayes`'s rows must come back bit-identical to
+the first run's. It does, with one exception that is worth stating precisely. Every refit
+record field is identical -- `mu`, `omega`, `alpha`, `beta`, `nu`, `max_r_hat`,
+`min_ess_tail` -- so all 102 posteriors were reproduced exactly, and in the forecast table
+`variance`, every interval bound, `var_99` and `pit` are identical bit for bit. The
+`mean` column moved in 0.98% of rows, by at most 1e-16 on a quantity of order 7e-4.
+
+The cause is in this session's own refactor rather than in the sampler. Run 1 computed
+`fit.draws[:, 0].mean()` -- a strided 1-D reduction, which NumPy does pairwise. Run 2
+computes `fit.draws.mean(axis=0)` once and indexes it, which accumulates sequentially
+over 2,000 rows. Sequential summation of n terms carries error of order n*eps against
+pairwise's log(n)*eps, and 2,000 * 2.2e-16 is exactly the size of the discrepancy
+observed. The two-line demonstration is in the session record.
+
+The current form is kept rather than reverted, because both tracks now read the *same*
+posterior-mean vector: reverting would make `garch_bayes` and `garch_bayes_mean` disagree
+about `mu` at the same 1e-16, which is worse for a comparison whose entire point is that
+the point estimate is held fixed.
+
+**What this does not do.** It does not rescue the sentence 1.13 retired. `garch_bayes`
+against `garch_mle` remains the confounded comparison; this track means the confound can
+now be measured rather than merely disclosed. The report still owes the decomposition,
+and the headline table still compares four models of which this is not one.
+
+**The decomposition, over the full evaluation window.** Mean width ratios
+across the 2,092 days with a Bayesian forecast:
+
+| level | C/B -- parameter uncertainty | B/A -- the priors | C/A -- what the table reports |
+|---|---|---|---|
+| 90% | 0.9975 | 0.9970 | 0.9945 |
+| 95% | 0.9989 | 0.9926 | 0.9915 |
+| 99% | **1.0032** | **0.9811** | 0.9842 |
+
+and by regime at the 99% level:
+
+| regime | n | C/B | B/A | C/A |
+|---|---|---|---|---|
+| calm | 756 | 1.0036 | 0.9927 | 0.9962 |
+| normal | 995 | 1.0031 | 0.9766 | 0.9796 |
+| stressed | 341 | 1.0027 | 0.9683 | 0.9709 |
+
+Three things follow, and Stage 4 should not have to rediscover any of them.
+
+Parameter uncertainty behaves exactly as the theory says and as the tests demand: it
+widens the 99% interval, narrows the shoulders, and the crossover between 95% and 99% is
+the leptokurtosis recorded at 1.11. Its magnitude is 0.32% at the 99% level. That is the
+project's headline effect, measured, and it is small -- which is a finding, not a
+disappointment, and the governing plan predicted it in the risk register.
+
+**The regime dependence of the reported difference is entirely the priors.** C/B is flat
+across regimes to within four parts in ten thousand -- 1.0036, 1.0031, 1.0027 -- while B/A
+runs from 0.9927 in calm markets to 0.9683 in stressed ones. The story "the Bayesian
+model's intervals behave differently in a crisis" is true of the reported comparison and
+false of parameter uncertainty. It is the `delta` prior pulling persistence off the
+boundary, and it bites hardest exactly when the MLE is closest to that boundary.
+
+The mean forecast variance ranks `garch_mle` 19.30% annualised, `garch_bayes_mean` 18.94%,
+`garch_bayes` 18.94%. The gap between the first two is the prior; the gap between the last
+two is Jensen's inequality on `h` and is three parts in ten thousand.
+
+---
+
+### 1.15 The real-sampler look-ahead audit, run (2026-08-26)
+
+D26 owed one run of `pytest --bayes-audit -m bayes_audit` with its result recorded here.
+**It passed**, in 39 minutes 41 seconds, against the code as committed -- so with both
+Bayesian tracks in scope, since it was run after D27 added the second.
+
+What it establishes beyond the stubbed audit that runs on every `pytest`: that a seeded
+NUTS run over an estimation window is a function of that window and nothing else, end to
+end. The clean run and the run with every observation from 2020-03-16 onward replaced by
+noise produce bit-identical forecast columns for every date up to and including the cut,
+across all 102 refits, with the real sampler in the loop.
+
+It is not owed again unless the sampler, the model graph, or `build_bayes_paths` changes.
+
+---
+
 ## 2. Changelog
 
 ### Stage 0 — Inspection and risk review (2026-08-21)

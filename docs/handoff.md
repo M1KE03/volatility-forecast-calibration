@@ -1,11 +1,11 @@
 # Handoff: how to continue
 
-**State as of 2026-08-26. Stage 3 complete.** All four forecasters exist, plus the
-GARCH-normal ablation, each with a forecast table over the 2,134-day evaluation window.
+**State as of 2026-08-26. Stage 3 complete.** All four forecasters exist, plus two
+ablations, each with a forecast table over the 2,134-day evaluation window.
 The Bayesian GARCH(1,1)-t is fitted by NUTS at each of the 102 refit dates and carries its
 whole posterior into the predictive. 100 of the 102 refits converged; the two that did not
 leave 42 evaluation days without a Bayesian forecast, which is a fact about the model
-rather than a gap to be filled. 227 tests pass, plus one skipped by default (§1 explains which). `evaluation.py` and `bootstrap.py` are
+rather than a gap to be filled. 231 tests pass, plus one skipped by default (§1 explains which). `evaluation.py` and `bootstrap.py` are
 still entirely stubs, and they are the next thing.
 
 **Read §4 before you read a single number out of `forecasts.csv`.** The Bayesian
@@ -35,9 +35,9 @@ python run_all.py --stage data       # cached; no network unless --refresh
 python run_all.py --stage eda        # diagnostics + 4 figures
 python run_all.py --stage backtest   # baselines + GARCH + 3 figures (~1 min)
 python run_all.py --stage bayes      # the Bayesian track (~95 min)
-pytest -q                            # expect 227 passed, 1 skipped (~13 min)
+pytest -q                            # expect 231 passed, 1 skipped (~14 min)
 pytest -m "not slow" -q              # inner loop (~2 min)
-pytest --bayes-audit -m bayes_audit   # the audit with NUTS itself (~40 min), owed once
+pytest --bayes-audit -m bayes_audit   # the audit with NUTS itself (~40 min); run at §1.15
 ```
 
 **The backtest is two stages, and that is a cost decision, not a design one.** The
@@ -76,10 +76,10 @@ touching the Bayesian track. Provenance and the verified SHA-256 are in `researc
 | `src/bootstrap.py` | **All stubs** (4 functions). **Next.** |
 
 Artefacts in `data/processed/`: `analysis_frame.csv` (2,890 rows), `forecasts.csv`
-(10,670 rows = 2,134 dates × 5 models), `refit_records.csv`
-(408 = 102 refits × 4 model tracks, carrying parameter estimates and
-convergence verdicts for both estimators), the per-track partials, and
-`backtest_config.json`.
+(12,804 rows = 2,134 dates × 6 models), `refit_records.csv` (408 rows = 102 refits × 4
+fits, carrying parameter estimates and convergence verdicts for both estimators — one
+record per *fit*, so the two baselines share a row and so do the two Bayesian tracks), the
+per-track partials, and `backtest_config.json`.
 
 ---
 
@@ -122,21 +122,28 @@ follows is only what Stage 4 needs to know.*
 failures (2025-02-10 and 2025-03-12) leave 42 of the 2,134 evaluation days without a
 Bayesian forecast, NaN in the table under D19 and not re-run.
 
-**The headline result is not the expected one, and §1.13 is not optional reading.**
-Bayesian intervals came out *narrower* than the frequentist plug-in at every level --
-0.9945 at 90%, 0.9915 at 95%, 0.9842 at 99% -- and most in stress: 0.9709 at 99% on
-stressed days against 0.9962 on calm ones. That is the opposite of what this project set
-out to find, and the first instinct is that the mixture is not carrying parameter
-uncertainty. It is. Decomposed on a COVID-period refit at the 99% level:
+**The headline result is not the expected one, and §1.13-1.14 are not optional
+reading.** Bayesian intervals came out *narrower* than the frequentist plug-in at every
+level, and most in stress. The first instinct is that the mixture is not carrying
+parameter uncertainty. It is. `garch_bayes_mean` -- the plug-in at the posterior mean,
+built for exactly this (D27) -- splits the reported difference in two, over all 2,092 days
+with a Bayesian forecast:
 
-| | ratio |
-|---|---|
-| posterior predictive over plug-in **at the posterior mean** -- parameter uncertainty | **1.0046** |
-| plug-in at the posterior mean over plug-in **at the MLE** -- the priors | **0.9550** |
+| level | C/B parameter uncertainty | B/A the priors | C/A reported |
+|---|---|---|---|
+| 90% | 0.9975 | 0.9970 | 0.9945 |
+| 95% | 0.9989 | 0.9926 | 0.9915 |
+| 99% | **1.0032** | **0.9811** | 0.9842 |
 
-Parameter uncertainty widens, as designed and as tested. It is simply small at these
-sample sizes, and it is outweighed four to five times over by the priors moving the point
-estimate.
+Parameter uncertainty widens the 99% interval by 0.32%, narrows the shoulders, and crosses
+over between 95% and 99% -- exactly the leptokurtosis of §1.11, exactly what the tests
+demand. It is simply **small**, which the governing plan's risk register predicted, and it
+is swamped by the priors moving the point estimate.
+
+**And the regime story belongs entirely to the priors.** At the 99% level C/B is flat
+across regimes -- 1.0036 calm, 1.0031 normal, 1.0027 stressed -- while B/A runs 0.9927,
+0.9766, 0.9683. "The Bayesian intervals behave differently in a crisis" is true of the
+reported comparison and false of parameter uncertainty. Say which one you mean.
 
 Five things carry into Stage 4.
 
@@ -178,12 +185,16 @@ Five things carry into Stage 4.
    against 5.20) and thins the Bayesian tails exactly at 99%.
 
    **So do not attribute the frequentist-Bayesian interval difference to parameter
-   uncertainty.** Decompose it. The cheap way is a fourth GARCH track -- plug-in at the
-   posterior mean -- which needs no sampling at all, since the posterior means for all 102
-   refits are already in `refit_records.csv` and the track is `garch11_filter` plus
-   `plugin_predictive`. It would be an ablation in the sense `garch_mle_normal` is, kept
-   out of the headline table. That is a recommendation, not a decision; §1.13 records it
-   as open.
+   uncertainty.** Decompose it — the machinery is now there. `garch_bayes_mean` (D27) is
+   the plug-in predictive at the posterior mean, produced from the same fits inside the
+   same loop, and it splits the comparison:
+
+       garch_bayes / garch_bayes_mean   -- parameter uncertainty, and nothing else
+       garch_bayes_mean / garch_mle     -- the priors, and nothing else
+
+   It is an ablation in the sense `garch_mle_normal` is and stays out of the headline
+   table. Every interval statement the report makes about parameter uncertainty must come
+   from the first ratio, never from `garch_bayes` against `garch_mle`.
 
 4. **A failed refit means missing days, and the evaluation layer must handle them.**
    Under D19 a Bayesian refit that fails its diagnostics produces no forecasts for the 21
@@ -266,9 +277,9 @@ These were promised in the log and must be honoured, not rediscovered:
 | Report states the `delta` prior was chosen on a structural criterion, with full-sample posterior summaries consulted for magnitude | §1.10 | 7 |
 | Prior sensitivity across all three `delta` candidates, on evaluation-window forecasts | §1.10 | 6 |
 | Report states `target_accept` was raised to 0.95 after a smoke refit diverged | §1.12 | 7 |
-| `pytest --bayes-audit -m bayes_audit` run once, with its result recorded in the log | §1.12 | before 7 |
+| ~~`pytest --bayes-audit -m bayes_audit` run once, result recorded~~ **done**, §1.15: passed in 39m41s. Owed again only if the sampler, the model graph or `build_bayes_paths` changes | §1.12 | — |
 | Missing Bayesian days reported as a property of the model, and every comparison stating its common sample | D19 | 4 |
-| Frequentist-Bayesian interval differences **decomposed**, never attributed to parameter uncertainty on their own | §1.13 | 4, 7 |
+| Frequentist-Bayesian interval differences **decomposed** via `garch_bayes_mean`, never attributed to parameter uncertainty on their own | §1.13, D27 | 4, 7 |
 | The README's "any interval difference is parameter uncertainty, full stop" corrected wherever it appears | §1.13 | 4 |
 
 ---
@@ -324,7 +335,7 @@ limitations section, not by omission.
 ## 10. First three commands for the next session
 
 ```bash
-pytest -q                                             # confirm 227 pass, 1 skips, before touching anything
+pytest -q                                             # confirm 231 pass, 1 skips, before touching anything
 python -c "import pandas as pd; f=pd.read_csv('data/processed/forecasts.csv'); print(f.groupby('model')['variance'].agg(['count','mean']))"
 sed -n '1,60p' docs/project1-implementation-plan.md   # re-read the contract
 ```

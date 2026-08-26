@@ -82,11 +82,36 @@ BASELINE_MODELS: tuple[str, ...] = ("yesterday", "ewma")
 #: GARCH models fitted by maximum likelihood (Stage 2).
 GARCH_MODELS: tuple[str, ...] = ("garch_mle", "garch_mle_normal")
 
-#: The Bayesian GARCH(1,1)-t (Stage 3). Shares ``garch_mle``'s likelihood exactly and
-#: differs from it in one respect only: the posterior is integrated over rather than
-#: collapsed to its maximum.
+#: The Bayesian GARCH(1,1)-t (Stage 3). Shares ``garch_mle``'s likelihood exactly.
 BAYES_MODEL = "garch_bayes"
-BAYES_MODELS: tuple[str, ...] = (BAYES_MODEL,)
+
+#: The plug-in predictive **at the posterior mean** -- the same point estimate
+#: ``garch_bayes`` integrates over, conditioned on as though it were the truth.
+#:
+#: **This exists because the comparison the project rests on turned out to have two
+#: causes rather than one** (research_log.md 1.13). ``garch_bayes`` against ``garch_mle``
+#: differs in two ways at once: the posterior is integrated over rather than maximised,
+#: *and* the priors move the point estimate off the likelihood's maximum. Measured at the
+#: 99% level on a COVID-period refit, the second effect is nine times the first and points
+#: the other way, so the difference between those two models is mostly prior. Inserting
+#: this track splits the comparison in two:
+#:
+#:     garch_bayes / garch_bayes_mean  -- parameter uncertainty, and nothing else
+#:     garch_bayes_mean / garch_mle    -- the priors, and nothing else
+#:
+#: It is an ablation in the sense ``garch_mle_normal`` is, not a fifth competitor, and it
+#: is kept out of ``HEADLINE_MODELS`` for the same reason. It costs no sampling: it reuses
+#: the posterior each refit already produced.
+BAYES_MEAN_MODEL = "garch_bayes_mean"
+
+#: Both models the Bayesian track produces from one set of fits.
+BAYES_MODELS: tuple[str, ...] = (BAYES_MODEL, BAYES_MEAN_MODEL)
+
+#: Models whose predictive is a Student-t plug-in at some point estimate. The point
+#: estimate differs -- a maximum for the MLE models, a posterior mean for
+#: ``garch_bayes_mean`` -- but what is done with it does not, which is the whole reason
+#: the comparison above isolates what it claims to.
+PLUGIN_MODELS: tuple[str, ...] = GARCH_MODELS + (BAYES_MEAN_MODEL,)
 
 #: Innovation distribution behind each GARCH model.
 INNOVATION_BY_MODEL: dict[str, str] = {
@@ -207,10 +232,14 @@ class RefitRecord:
     keeps its name because it really is specific to the MLE and is NaN on the Bayesian
     rows: a posterior has no maximised log-likelihood.
 
-    One record per (refit date, model). The parameter fields make this table the audit
-    trail for all 102 fits per model as well as the diagnostics log -- the
-    parameter-stability figure reads it directly, so the plotted estimates and the
-    recorded ones cannot drift apart.
+    One record per (refit date, **fit**) rather than per model, because several models
+    can rest on one fit: the two baselines share a record, and so do ``garch_bayes`` and
+    ``garch_bayes_mean``, which are two things done with a single posterior. A second
+    record would duplicate every field of the first.
+
+    The parameter fields make this table the audit trail for all 102 fits per estimator as
+    well as the diagnostics log -- the parameter-stability figure reads it directly, so
+    the plotted estimates and the recorded ones cannot drift apart.
     """
 
     refit_id: int
@@ -453,7 +482,11 @@ def build_bayes_paths(
     config: BacktestConfig,
     *,
     cores: int | None = None,
-) -> tuple[pd.DataFrame, list[RefitRecord], dict[pd.Timestamp, M.PredictiveDistribution]]:
+) -> tuple[
+    dict[str, pd.DataFrame],
+    list[RefitRecord],
+    dict[pd.Timestamp, M.PredictiveDistribution],
+]:
     """Variance path, refit diagnostics and daily predictives for the Bayesian model.
 
     The Bayesian analogue of ``build_garch_paths``, and deliberately its mirror image:
@@ -484,17 +517,33 @@ def build_bayes_paths(
     code as every other model's -- which is the invariant that stops a calibration
     difference from being an artefact of the plumbing.
 
+    **Two models, one set of fits.** ``garch_bayes`` integrates over the posterior;
+    ``garch_bayes_mean`` conditions on its mean as though it were the truth. They are
+    produced together because they must come from the *same* posterior for their
+    difference to isolate parameter uncertainty -- computing the second from a separately
+    persisted table of posterior means would work until the day the two fell out of step,
+    and then it would keep working, quietly. The second costs one extra filter pass per
+    refit and no sampling at all.
+
+    Note that ``garch_bayes_mean``'s variance is ``h`` filtered *at* the posterior mean,
+    while ``garch_bayes``'s is the *mean of* ``h`` across draws. Those differ by Jensen's
+    inequality, and they should: one is a plug-in, the other a posterior expectation.
+
+    A failed refit blanks both tracks. They rest on the same draws, so a posterior not
+    worth integrating is not worth averaging either.
+
     Returns
     -------
-    path:
-        Indexed by out-of-sample date, columns ``PATH_COLUMNS``. Posterior means; NaN on
-        the blocks of failed refits.
+    paths:
+        One frame per model in ``BAYES_MODELS``, indexed by out-of-sample date with
+        columns ``PATH_COLUMNS``. NaN on the blocks of failed refits.
     records:
-        One per refit, carrying the posterior means, the NUTS diagnostics and the
-        convergence verdict.
+        One per refit -- not one per model. Both models come from a single fit, so a
+        second record would duplicate every field of the first, exactly as the two
+        baselines share one record per refit.
     distributions:
-        One mixture predictive per date a converged refit serves. Dates missing from
-        this mapping have no Bayesian forecast, and the harness writes NaN for them.
+        One mixture predictive per date a converged refit serves, for ``garch_bayes``
+        alone. Dates missing from it have no Bayesian forecast and the harness writes NaN.
     """
     full_index = pd.DatetimeIndex(frame.index)
     returns = frame["log_return"].to_numpy(dtype=float)
@@ -503,7 +552,10 @@ def build_bayes_paths(
     oos_index = pd.DatetimeIndex(oos.index)
     refit_dates = make_refit_dates(oos_index, refit_every=config.refit_every)
 
-    path = pd.DataFrame(index=oos_index, columns=list(PATH_COLUMNS), dtype=float)
+    paths = {
+        model: pd.DataFrame(index=oos_index, columns=list(PATH_COLUMNS), dtype=float)
+        for model in BAYES_MODELS
+    }
     records: list[RefitRecord] = []
     distributions: dict[pd.Timestamp, M.PredictiveDistribution] = {}
 
@@ -537,6 +589,7 @@ def build_bayes_paths(
             else len(oos_index)
         )
         block = oos_index[block_start:block_stop]
+        posterior_mean = fit.draws.mean(axis=0)
 
         if fit.converged and len(block) > 0:
             # h[t] for t in the block depends on returns strictly before t, so slicing
@@ -548,16 +601,24 @@ def build_bayes_paths(
                 fit.draws, returns[:stop], h0, np.asarray(positions, dtype=np.int64)
             )
 
-            path.loc[block, "variance"] = h_by_draw.mean(axis=0)
-            path.loc[block, "mu"] = float(fit.draws[:, 0].mean())
-            path.loc[block, "nu"] = float(fit.draws[:, 4].mean())
+            paths[BAYES_MODEL].loc[block, "variance"] = h_by_draw.mean(axis=0)
+            paths[BAYES_MODEL].loc[block, "mu"] = float(posterior_mean[0])
+            paths[BAYES_MODEL].loc[block, "nu"] = float(posterior_mean[4])
 
             for offset, date in enumerate(block):
                 distributions[date] = M.mixture_predictive(
                     fit.draws, h_by_draw[:, offset]
                 )
 
-        posterior_mean = fit.draws.mean(axis=0)
+            # The plug-in track: one filter pass at the posterior mean, read off at the
+            # same dates. Deliberately ``garch11_filter`` rather than a summary of
+            # ``h_by_draw`` -- conditioning on a point estimate means running the
+            # recursion at that point, which is what ``build_garch_paths`` does with the
+            # MLE and what makes the two plug-ins comparable.
+            h_mean = M.garch11_filter(posterior_mean, returns[:stop], h0)[positions]
+            paths[BAYES_MEAN_MODEL].loc[block, "variance"] = h_mean
+            paths[BAYES_MEAN_MODEL].loc[block, "mu"] = float(posterior_mean[0])
+            paths[BAYES_MEAN_MODEL].loc[block, "nu"] = float(posterior_mean[4])
         records.append(
             RefitRecord(
                 refit_id=refit_id,
@@ -585,7 +646,7 @@ def build_bayes_paths(
             )
         )
 
-    return path, records, distributions
+    return paths, records, distributions
 
 
 def _predictive(
@@ -602,21 +663,22 @@ def _predictive(
     baselines get a Gaussian directly (decision D12): they are the naive-UQ baseline and
     have no fitted innovation distribution to plug in.
 
-    The Bayesian model arrives with its predictive already built, because a mixture over
+    ``garch_bayes`` arrives with its predictive already built, because a mixture over
     2,000 posterior draws cannot be reconstructed from ``(variance, mu, nu)``. Handed
-    those three numbers and nothing else it raises rather than falling back on a plug-in:
-    a Bayesian row built from the posterior *mean* would be a frequentist forecast
-    wearing the Bayesian model's name, and it would agree with ``garch_mle`` for a reason
-    that has nothing to do with the finding.
+    those three numbers and nothing else it raises rather than falling back on a plug-in.
+    That fallback is exactly what ``garch_bayes_mean`` *is*, and the two must never be
+    confused: one integrates over the posterior, the other conditions on its mean, and the
+    difference between them is the parameter uncertainty this project set out to measure.
+    Silently substituting the second for the first would report that quantity as zero.
     """
-    if model in BAYES_MODELS:
+    if model == BAYES_MODEL:
         if distribution is None:
             raise ValueError(
                 f"{model!r} needs its mixture predictive passed in; it cannot be "
                 "rebuilt from a variance, a mean and a nu"
             )
         return distribution
-    if model in GARCH_MODELS:
+    if model in PLUGIN_MODELS:
         params = GarchParams(
             mu=mu, omega=float("nan"), alpha=float("nan"), beta=float("nan"), nu=nu
         )
@@ -740,11 +802,11 @@ def run_backtest(
         paths[model] = path
         records.extend(garch_records)
 
-    if BAYES_MODEL in wanted:
-        path, bayes_records, bayes_distributions = build_bayes_paths(
+    if any(model in BAYES_MODELS for model in wanted):
+        bayes_paths, bayes_records, bayes_distributions = build_bayes_paths(
             frame, config, cores=cores
         )
-        paths[BAYES_MODEL] = path
+        paths.update(bayes_paths)
         records.extend(bayes_records)
         distributions[BAYES_MODEL] = bayes_distributions
 

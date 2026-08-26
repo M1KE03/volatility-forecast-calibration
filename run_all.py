@@ -292,6 +292,12 @@ def stage_bayes(args: argparse.Namespace) -> None:
     alone -- both halves are the same loop, run over the same refit dates, under the same
     config.
 
+    Two models come out of those fits. ``garch_bayes`` integrates over each posterior;
+    ``garch_bayes_mean`` conditions on its mean. The second costs no sampling and exists
+    so that the comparison this project rests on has one cause at a time: ``garch_bayes``
+    against ``garch_bayes_mean`` is parameter uncertainty, and ``garch_bayes_mean``
+    against ``garch_mle`` is the priors (research_log.md 1.13).
+
     A refit that fails its convergence diagnostics produces no forecasts for the 21 days
     it serves (decision D19), and those days stay NaN in the forecast table. That is
     reported here rather than filtered out: a Bayesian model that cannot be sampled on
@@ -322,14 +328,15 @@ def stage_bayes(args: argparse.Namespace) -> None:
     forecasts, records = B.run_backtest(frame, config, models=B.BAYES_MODELS)
     record_frame = pd.DataFrame([asdict(r) for r in records])
 
-    sub = forecasts[forecasts.model == B.BAYES_MODEL]
-    ann = (sub["variance"].mean() * 252) ** 0.5
     print()
-    print(
-        f"  {B.BAYES_MODEL:<18} {len(sub):,} rows, "
-        f"{sub['variance'].notna().sum():,} finite, "
-        f"mean annualised vol {ann:.2%}"
-    )
+    for model in B.BAYES_MODELS:
+        sub = forecasts[forecasts.model == model]
+        ann = (sub["variance"].mean() * 252) ** 0.5
+        print(
+            f"  {model:<18} {len(sub):,} rows, "
+            f"{sub['variance'].notna().sum():,} finite, "
+            f"mean annualised vol {ann:.2%}"
+        )
 
     failed = record_frame[~record_frame["converged"]]
     print(
@@ -347,6 +354,22 @@ def stage_bayes(args: argparse.Namespace) -> None:
             f"    !! {bad['refit_date'].date()} did NOT converge: {bad['message']}  "
             f"({config.refit_every} days have no forecast)"
         )
+
+    # The decomposition the run exists to make possible, reported where it is produced
+    # rather than left for the evaluation layer to discover.
+    bayes = forecasts[forecasts.model == B.BAYES_MODEL]
+    mean = forecasts[forecasts.model == B.BAYES_MEAN_MODEL]
+    both = bayes["variance"].notna().to_numpy() & mean["variance"].notna().to_numpy()
+    if both.any():
+        print()
+        print("  parameter uncertainty alone (garch_bayes / garch_bayes_mean widths):")
+        for level, lo, hi in (("90%", "lo_90", "hi_90"), ("95%", "lo_95", "hi_95"),
+                              ("99%", "lo_99", "hi_99")):
+            ratio = (
+                (bayes[hi] - bayes[lo]).to_numpy()[both]
+                / (mean[hi] - mean[lo]).to_numpy()[both]
+            )
+            print(f"    {level}: mean ratio {ratio.mean():.4f}")
 
     written = B.save_track("bayes", forecasts, records, config, PROCESSED_DIR)
     print()
