@@ -260,32 +260,62 @@ class FrequentistFit:
 
 @dataclass(frozen=True)
 class BayesianFit:
-    """Posterior draws from the GARCH(1,1)-t model.
+    """Posterior draws from the GARCH(1,1)-t model, with NUTS diagnostics.
+
+    Re-keyed at Stage 3 from the emcee fields the Stage 1 stub carried
+    (``acceptance_fraction``, ``autocorr_time``, ``n_effective``), which describe a
+    random-walk sampler and have no NUTS analogue. Decision B1-R adopted PyMC/NUTS as
+    route A; the diagnostics stored here are the ones that route actually produces and
+    that the write-up is obliged to report. Recorded in research_log.md 1.10.
+
+    Mirrors ``FrequentistFit`` deliberately: both carry ``converged`` and a verbatim
+    ``message``, so the backtest can apply one rule to a failed fit regardless of which
+    model produced it (decision D16, extended to the Bayesian track by D19).
 
     Attributes
     ----------
     draws:
-        Array of shape ``(n_draws, 5)`` in ``PARAM_NAMES`` order, post burn-in and
-        post thinning, with walkers flattened.
+        Array of shape ``(n_draws, 5)`` in ``PARAM_NAMES`` order, post warm-up and post
+        thinning, with chains flattened. On the **raw return scale**: sampling runs on
+        percent returns (D14) and the draws are converted back before they are stored,
+        so nothing outside the sampler sees the percent convention.
     log_prob:
-        Log posterior density at each retained draw, shape ``(n_draws,)``.
-    acceptance_fraction:
-        Mean acceptance fraction across walkers. Diagnostic; must be reported.
-    autocorr_time:
-        Estimated integrated autocorrelation time per parameter, shape ``(5,)``. NaN if
-        the chain was too short to estimate it — which is itself a finding and must be
-        reported rather than hidden.
-    n_effective:
-        Crude effective sample size per parameter, shape ``(5,)``.
+        Unnormalised log posterior density at each retained draw, shape ``(n_draws,)``.
+    r_hat:
+        Split-R-hat per parameter, shape ``(5,)``, in ``PARAM_NAMES`` order. The
+        convergence criterion, not a decoration.
+    ess_bulk:
+        Bulk effective sample size per parameter, shape ``(5,)``. Governs how well the
+        posterior *centre* is resolved.
+    ess_tail:
+        Tail effective sample size per parameter, shape ``(5,)``. Governs how well the
+        posterior *tails* are resolved, which is what the 99% predictive quantiles are
+        built from -- so for this project it is the more relevant of the two.
+    n_divergences:
+        Number of divergent transitions. A divergence means the sampler failed to
+        explore part of the posterior geometry; the draws are then not a sample from
+        the target and no amount of them fixes it.
+    converged:
+        Whether every diagnostic threshold in ``BAYES_CONVERGENCE`` was met. **Never**
+        discard this. A failed fit propagates to the backtest record and to the report;
+        it is not replaced by the previous window's draws.
+    message:
+        Which threshold failed, and by how much, retained verbatim for the record.
+    n_obs:
+        Observations used.
     seed:
         The seed used, so the chain can be reproduced exactly.
     """
 
     draws: np.ndarray
     log_prob: np.ndarray
-    acceptance_fraction: float
-    autocorr_time: np.ndarray
-    n_effective: np.ndarray
+    r_hat: np.ndarray
+    ess_bulk: np.ndarray
+    ess_tail: np.ndarray
+    n_divergences: int
+    converged: bool
+    message: str
+    n_obs: int
     seed: int
 
 

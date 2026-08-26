@@ -486,6 +486,140 @@ the probe's `beta = (1 - alpha) * delta` construction enforces `alpha + beta < 1
 construction, so the posterior will press against the same boundary, and a prior that
 pushes back hard on it would be making a modelling choice that should be visible rather
 than incidental.
+### 1.10 Decided at Stage 3 (2026-08-26)
+
+**D4 resolved -- the priors, frozen before any Bayesian out-of-sample number exists.**
+On the percent return scale (D14), with `beta` a deterministic transform rather than a
+sampled parameter:
+
+| Parameter | Prior | Reasoning |
+|---|---|---|
+| `mu` | `Normal(0, 1)` | Daily SPY returns have a mean near 0.05 and a standard deviation near 1.1 on this scale. A unit-scale prior is weakly informative: wide enough not to bind, narrow enough to exclude absurdities. |
+| `omega` | `HalfNormal(1)` | Positivity by construction. The MLE puts `omega` near 0.05, so a unit scale is diffuse by a factor of ~20 and does not bind. |
+| `alpha` | `Beta(2, 10)` | Support is exactly `[0, 1]`, prior mean 0.167 against an MLE range of 0.181-0.241 across the 102 refits. Mildly informative and centred where the data lives. |
+| `delta` | `Beta(3, 1)` | `beta = (1 - alpha) * delta`, so `alpha + beta < 1` holds **by construction** and stationarity never has to be rejected by the sampler. See the deviation note below. |
+| `nu` | `Exponential(1/10)` truncated below at 4 | Prior mean ~14, i.e. leaning toward near-normal tails, so fat tails have to be earned from the data. The truncation at 4 keeps the kurtosis finite (the model-specification constraint stated in `models.py`), not merely the variance. |
+
+Support constraints follow from the parameterisation rather than being imposed on top of
+it: `omega > 0` from `HalfNormal`, `alpha` and `delta` in `[0, 1]` from `Beta`,
+`beta >= 0` and `alpha + beta < 1` from the transform, `nu > 4` from the truncation. No
+rejection sampling and no hand-written bounds, which is the reason this parameterisation
+was chosen over sampling `beta` directly.
+
+**Deviation from the specification recorded at 1.6: `delta ~ Beta(3, 1)`, not
+`Beta(10, 2)`.** The feasibility probe used `Beta(10, 2)` and 1.6 called it a starting
+point that D4 had to confirm. It does not survive confirmation, for a structural reason
+fixed before the comparison was run: a `Beta(a, b)` density vanishes at 1 whenever
+`b > 1`, so `Beta(10, 2)` places **zero** prior density at `delta = 1` -- exactly the
+near-IGARCH boundary that 1.9 recorded the data pressing against, with `alpha + beta`
+at or above 0.999 in 16 of the 102 MLE refits. A prior that vanishes where the
+likelihood concentrates is making a modelling choice, and 1.9 asked for that choice to be
+visible rather than incidental. `Beta(3, 1)` has density 3 at the boundary and is
+increasing toward it; `Beta(1, 1)` has density 1 there.
+
+The magnitude was then measured rather than assumed, at 4 chains x (1,000 tune + 1,000
+draw):
+
+| Window | `delta` prior | posterior `alpha+beta` | 90% interval | P(>0.99) | divergences |
+|---|---|---|---|---|---|
+| warm-up, n=756 (MLE 0.95034) | `Beta(10,2)` | 0.93091 | [0.8777, 0.9746] | 0.006 | 0 |
+| | `Beta(3,1)` | 0.93962 | [0.8800, 0.9872] | 0.038 | 0 |
+| | `Beta(1,1)` | 0.93586 | [0.8748, 0.9858] | 0.032 | 0 |
+| full sample, n=2,890 (MLE 0.99536) | `Beta(10,2)` | 0.98356 | [0.9688, 0.9956] | 0.234 | 0 |
+| | `Beta(3,1)` | 0.98876 | [0.9739, 0.9990] | 0.500 | 0 |
+| | `Beta(1,1)` | 0.98855 | [0.9735, 0.9990] | 0.497 | 1 |
+
+Three things this shows. The prior does bind, but only on the long window -- at n=756 the
+three answers differ by 0.009, and at n=2,890 `Beta(10,2)` sits 0.005 below the other
+two, placing the MLE at roughly its 95th percentile. `Beta(3,1)` and `Beta(1,1)` agree to
+within Monte Carlo noise, which is what identifies that gap as the prior binding rather
+than as chance. And `Beta(1,1)` produced a divergence where `Beta(3,1)` produced none, so
+the flatter prior buys nothing and costs sampler behaviour.
+
+**The stakes are small and are recorded as small.** A 0.005 difference in `alpha + beta`
+moves a one-day-ahead variance forecast by about 0.5%, hence interval widths by about
+0.25%. This choice will not decide the headline, and this entry should not later be read
+as implying it did. The choice was made on the structural argument; the measurement
+establishes magnitude, not the winner.
+
+**Disclosure: the full-sample rows above were computed on data that includes the
+evaluation period.** The rule in 1.3 is that priors are frozen before any out-of-sample
+*number* is computed, and no forecast, interval, coverage, loss or VaR quantity was
+produced -- these are posterior parameter summaries. The information they carry, that
+persistence runs to the stationarity boundary on long windows, was already on this log's
+record at 1.9 from the frequentist refits before Stage 3 began, and the selection
+criterion was structural and fixed in advance. It is recorded anyway rather than passed
+over, because a project whose subject is look-ahead does not get to decide for itself
+which of its own peeks were harmless. **The report must state that the prior on `delta`
+was selected on a structural criterion, with full-sample posterior summaries consulted
+for magnitude.** Prior sensitivity across all three candidates belongs in
+`03_robustness`, where the comparison can be redone on evaluation-window forecasts.
+
+**D17 -- Sampler settings: 4 chains x (1,000 tune + 1,000 draw), `target_accept = 0.9`,
+chains run in parallel.**
+Four chains rather than two because split-R-hat is the convergence criterion and PyMC
+itself warns that fewer than four makes it unreliable. Two thousand retained draws per
+refit rather than the probe's 1,000 because `ess_tail` -- not `ess_bulk` -- is what the
+99% predictive quantiles are built from, and the 99% level is where this project's
+finding lives. Measured: `ess_tail` at or above 1,319 on the full window under the
+adopted prior, no divergences, R-hat at most 1.002.
+
+Cost was measured, not extrapolated: 30.4 s per fit at n=756 and 83.6 s at n=2,890,
+near-linear in window length, so **95-100 minutes for a full Bayesian backtest** across
+the 102 expanding refits. The alternative of 2 chains x (500 + 500) was measured at 17.0 s
+on the warm-up window, about 40 minutes end to end, and was rejected: a factor of two in
+wall clock does not justify a weaker convergence diagnostic on the stage the project is
+named after. Note that 1.6's "on the order of 20 minutes" was an extrapolation from a
+warm-up-sized window at the smaller setting and understated the real cost by roughly five
+times; windows grow to 3.8x the warm-up length by the end of the backtest.
+
+**D18 -- 2,000 of the 4,000 posterior draws are carried into the predictive stage.**
+The withdrawn D6 proposed thinning to a fixed 2,000 from a much larger emcee chain. Under
+NUTS the arithmetic is different: 4 chains x 1,000 post-warm-up draws is 4,000, of which
+the predictive stage carries every second draw -- deterministically, not as a random
+subsample. NUTS draws are near-independent (`ess_bulk` runs 1,300-2,600 out of 4,000), so
+thinning discards real information rather than redundancy; the only reason to do it is the
+per-day cost of the mixture quantile solve, which is linear in draw count. 2,000 is the
+compromise, and it is a compute decision with no modelling content. If the daily
+predictive proves cheaper than expected, carrying all 4,000 is strictly better and needs
+no re-freezing.
+
+**D19 -- A Bayesian refit that fails its diagnostics produces no forecasts for its
+block.** D16 extended to the Bayesian track, with the same reasoning and the same
+consequence: the 21 days served by a failed fit stay NaN and the failure is written into
+its record verbatim. Convergence means **all** of: R-hat at most 1.01 on every sampled
+parameter, zero divergent transitions, and `ess_tail` at least 400 on every sampled
+parameter.
+
+Zero divergences rather than a small tolerance, because a divergence is not noise -- it
+says the sampler failed to explore part of the posterior geometry, so the draws are not a
+sample from the target and more of them do not fix it. The thresholds are fixed now,
+before any refit has been run, for the reason handoff 8.6 gives: a diagnostic threshold
+loosened after it fires is not a diagnostic. **No failed refit is re-run with a different
+seed in the hope of a better verdict**, which is D16's multi-start rule in another
+costume. All three candidate priors cleared these thresholds on both the warm-up and the
+full window, so the criterion is not expected to bind -- but behaviour under failure must
+not depend on whether the real data happens to trigger one, and a forced-failure test
+alongside `test_a_failed_refit_produces_no_forecasts_rather_than_stale_ones` will cover
+it.
+
+**D20 -- The look-ahead audit runs the Bayesian track at a reduced draw count.**
+At the adopted settings a full Bayesian backtest is ~100 minutes, and the audit runs the
+backtest once clean plus once per corruption date, which would put a full `pytest` run
+above five hours. Problems-and-solutions 35 rejects buying audit speed by truncating the
+sample or dropping a model, and that rejection stands. This is a different trade, and the
+distinction is the whole justification: **draw count controls Monte Carlo precision, not
+which data reaches a fit.** Every surface the audit exists to check -- the estimation
+slice ending strictly before the refit date, `h0` backcast from the estimation window
+alone, the daily filter -- is exercised over all 102 refit dates, in the same code path,
+at any draw count. The audit's assertions are exact equalities under a fixed seed, and a
+fixed seed is as exact at 100 draws as at 2,000.
+
+What this does **not** cover is a bug that appears only at production draw counts. Nothing
+in the forecast path is plausibly draw-count dependent in that way, but the claim is
+recorded so it can be checked rather than assumed, and the headline artefacts are
+generated at full settings regardless.
+
 ---
 
 ## 2. Changelog

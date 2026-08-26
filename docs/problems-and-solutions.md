@@ -677,6 +677,35 @@ always to move one of them somewhere with known headroom.
 
 ---
 
+## Environment
+
+### 37. PyMC's parallel chains hung the machine instead of erroring
+
+**Problem.** Sampling with `cores > 1` from a script with no `if __name__ ==
+"__main__":` guard. On Windows, multiprocessing uses spawn rather than fork, so each
+worker re-imports the module that started it -- which starts sampling again, which
+spawns more workers. The script does not fail; it forks until something gives out. The
+first run was killed at a ten-minute timeout having produced no output at all, and the
+symptom -- silence -- looks exactly like a slow model.
+
+**Why it mattered.** The visible cost was one wasted timeout. The invisible one was the
+conclusion nearly drawn from it: that the full-window fit was intractably slow, which
+would have argued for cutting chains or draws, i.e. weakening the convergence diagnostics
+on the strength of a bug. Python does print a `RuntimeError` about safe importing of the
+main module, but it prints it from the *child* process, so it lands in a log nobody is
+tailing while the parent keeps going.
+
+**Solution.** Guard the entry point. `run_all.py` already has one at its `if __name__ ==
+"__main__":` line, so the production path was never at risk -- but any throwaway probe,
+any notebook cell shelling out, and any test that samples with `cores > 1` is. The real
+timings, once guarded: 30.4 s at n=756 and 83.6 s at n=2,890, against 56 s and an unknown
+for the same fits run sequentially.
+
+**Generalisation.** A process that produces no output is not evidence of a slow process.
+Before concluding that something is expensive, confirm it has started.
+
+---
+
 ## Still open
 
 Carried forward deliberately, not overlooked:
@@ -684,12 +713,16 @@ Carried forward deliberately, not overlooked:
 - **Residual conditional bias in the scaled proxy** (#9). Wording obligation on the
   report; robustness check owed at Stage 6.
 - **Constant mean over the evaluation period** (#10). Limitations section.
-- **Priors for the Bayesian GARCH.** Must be frozen in `research_log.md` *before* any
-  out-of-sample number is computed. Stage 3, and still the largest open obligation.
-- **`BayesianFit` still carries emcee fields.** `acceptance_fraction` and
-  `autocorr_time` were superseded by B1-R's switch to NUTS. `BacktestConfig` and
-  `RefitRecord` were re-keyed at Stage 1 (#18); this dataclass was not, because Stage 2
-  does not touch it. Stage 3 must, before it fills any of them in.
+- ~~**Priors for the Bayesian GARCH.**~~ **Frozen at Stage 3** in `research_log.md`
+  1.10, before any Bayesian out-of-sample number existed. `delta ~ Beta(3, 1)` departs
+  from the 1.6 probe's `Beta(10, 2)`, which placed zero density at the stationarity
+  boundary the data presses against. What remains owed is the report sentence disclosing
+  that full-sample posterior summaries were consulted for magnitude, and the prior
+  sensitivity check in `03_robustness`.
+- ~~**`BayesianFit` still carries emcee fields.**~~ **Re-keyed at Stage 3** to
+  `r_hat`, `ess_bulk`, `ess_tail`, `n_divergences`, plus `converged`/`message`/`n_obs`
+  mirroring `FrequentistFit` so D19 can apply D16's rule to both tracks. Nothing outside
+  `models.py` referenced the old fields.
 - **Persistence near the stationarity boundary.** `alpha + beta` reaches 0.99998 and
   exceeds 0.999 in 16 of the 102 refits (log §1.9). Admissible throughout, but the
   Bayesian model enforces the same constraint by construction, so the posterior will
