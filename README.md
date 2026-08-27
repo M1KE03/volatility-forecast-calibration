@@ -508,3 +508,8 @@ and never reaches the analysis frame (decision D8 in `research_log.md`).
 - All stochastic components take an explicit seed.
 - `run_all.py` is the only supported entry point. Notebooks read cached artefacts and
   contain no reusable logic.
+- **Verified from a fresh clone**, not merely claimed: cloning this repository and running
+  `--stage data` and `--stage backtest` reproduces `analysis_frame.csv` and
+  `forecasts_frequentist.csv` **byte for byte**. That is the check the `.gitattributes`
+  rule exists for -- without it Git rewrites the raw CSVs' line endings on checkout, every
+  SHA-256 in the manifest mismatches, and the pipeline refuses to run.

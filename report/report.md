@@ -149,6 +149,12 @@ read carefully: a non-rejection on a hit sequence of 37 events is a **failure to
 a small sample**, not a demonstration that breaches are well timed. A first-order Markov
 test has little power there.
 
+![99% VaR breaches over time](../figures/10_var_hit_sequence.png)
+
+*Every model breaches its 99% VaR far more often than the 21 days it promised, and the
+breaches are spread across the sample rather than concentrated in the shaded stress
+episodes. Too many exceptions, arriving at the wrong rate rather than at the wrong time.*
+
 The tails are also misallocated. At the 99% two-sided level GARCH-t (MLE) breaches its
 lower bound 20 times and its upper bound twice, against roughly 10.7 expected in each tail.
 The interval is close to the right total width and almost every exception is a loss.
@@ -191,6 +197,14 @@ determines whether a risk model's intervals are calibrated.
 The baselines degrade monotonically with volatility — the pattern one would have predicted
 for all four. The GARCH models do not. They are indistinguishable from nominal in calm and
 in stress, and clearly too high in the middle band.
+
+![99% VaR breach rate by regime](../figures/13_regime_var_rate.png)
+
+*The headline result. Error bars are block bootstrap intervals computed within each
+regime; a bar whose interval straddles the dashed 1% line is a rate this sample cannot
+distinguish from nominal. Both GARCH models straddle it in calm and in stress and clear
+it in the middle. The stressed intervals are wide because 347 days of stress are a
+handful of long runs, not 347 independent observations.*
 
 The mechanism is the tail misallocation of §6.2, concentrated: at 99% two-sided in the
 normal regime, GARCH-t (MLE) puts **14 breaches below the interval and none above** against
@@ -291,7 +305,8 @@ pytest -q                              # the full suite, including the look-ahea
 ```
 
 Raw data is a committed snapshot verified against a SHA-256 manifest; the pipeline refuses
-to run on altered bytes. Every seed is fixed — the sampler's in `BacktestConfig`, the
+to run on altered bytes. The reproduction claim is tested rather than asserted: a fresh
+clone reproduces the analysis frame and the frequentist forecast table byte for byte. Every seed is fixed — the sampler's in `BacktestConfig`, the
 bootstrap's separately in `src/bootstrap.py`, so evaluation intervals are reproducible
 independently of the sampler. Decisions, including the ones that turned out to be wrong and
 the ones that were refused, are recorded in `research_log.md`; the traps encountered are in
