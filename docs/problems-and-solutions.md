@@ -7,7 +7,7 @@ Companion to `research_log.md` and `README.md`.
 - This file is the **problem-oriented** view: every difficulty encountered so far, why it
   mattered, and the fix that is now in the repository.
 
-Scope: everything up to the end of **Stage 4** (evaluation layer complete, 2026-08-27).
+Scope: everything up to the end of **Stage 5** (regime analysis complete, 2026-08-27).
 The entries are grouped by the stage that produced them. The summary table below covers
 entries 1-36, through Stage 2; entries 37 onward — the Bayesian model and the evaluation
 layer — are listed in full further down without a summary row.
@@ -886,6 +886,46 @@ of two failure modes a model has is exactly what it bought.
 results section. When the tables contradict the plan, the finding is the contradiction --
 and the sentence in the plan is the thing that has to change, in the write-up, not in the
 plan itself, which is the contract and stays as written.
+
+---
+
+### 43. The robustness check had a look-ahead in it by default
+
+**Problem.** The governing plan's regime sensitivity is "terciles of trailing 21-day
+Parkinson vol". Written the obvious way -- `trailing.quantile([1/3, 2/3])` on the series
+you have -- the cut points are computed over all 2,890 days, which means every day's
+regime label is a function of days that had not happened yet. The 2020 and 2022 episodes
+would help decide what counts as a stressed day in 2017.
+
+**Why it mattered.** It is the same class of error the whole project exists to detect, and
+this one would have been invisible: the labels look sensible, the buckets come out at
+roughly a third each, every downstream table runs, and the resulting figure would have
+been a *more* flattering version of the real one. The locked VIX thresholds have no such
+problem -- 15 and 25 were fixed before any code was written, which is exactly why the plan
+locked numbers rather than quantiles -- so the alternative definition had to earn a
+property the primary one gets for free.
+
+The plan's own text says the thresholds are "fixed on the warm-up sample". Easy to read
+past; the parenthesis is doing real work.
+
+**Solution.** `trailing_vol_thresholds` is a separate function from
+`assign_trailing_vol_regime`, reads `:TRAIN_END` and nothing after it, and is pinned on
+both sides: multiplying every evaluation-period observation by 100 leaves the cut points
+bit-identical, and tripling the warm-up moves them. The labeller takes them as an argument
+so a caller can pin them explicitly, never so they can be re-estimated later. Decision
+D35.
+
+The visible cost is that the out-of-sample buckets are not equal thirds. The warm-up was
+calm, so 1,040 of the 2,134 evaluation days land in the top bucket and only 367 in the
+middle -- and the tercile "stressed" bucket is therefore a much weaker notion of stress
+than VIX above 25. That is reported rather than corrected, because every available
+correction reintroduces the look-ahead.
+
+**Generalisation.** A threshold estimated from data is a parameter, and it inherits every
+question asked of a parameter -- including which sample it was allowed to see. Sensitivity
+checks are where this slips through, because the check is by definition not the headline
+result and gets a fraction of the scrutiny. Give the alternative the same discipline as
+the primary, or the robustness check is the least trustworthy number in the report.
 
 ---
 

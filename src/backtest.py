@@ -482,6 +482,7 @@ def build_bayes_paths(
     config: BacktestConfig,
     *,
     cores: int | None = None,
+    prior_delta: tuple[float, float] = M.PRIOR_DELTA,
 ) -> tuple[
     dict[str, pd.DataFrame],
     list[RefitRecord],
@@ -524,6 +525,15 @@ def build_bayes_paths(
     persisted table of posterior means would work until the day the two fell out of step,
     and then it would keep working, quietly. The second costs one extra filter pass per
     refit and no sampling at all.
+
+
+    **``prior_delta`` is how the Stage 6 sensitivity check runs, and it is not a knob.**
+    It defaults to the frozen D4 value, so every headline result is computed under the
+    priors that were frozen before any Bayesian out-of-sample number existed. The two
+    other candidates D4 considered are re-run through ``run_all.py --stage priors``,
+    which writes to its own directory and never touches ``forecasts.csv``. Overriding it
+    here produces a *different run*, and the run that produced the report's numbers is
+    the one with the default.
 
     Note that ``garch_bayes_mean``'s variance is ``h`` filtered *at* the posterior mean,
     while ``garch_bayes``'s is the *mean of* ``h`` across draws. Those differ by Jensen's
@@ -579,6 +589,7 @@ def build_bayes_paths(
             # under another one (D16, extended to this track by D19).
             seed=config.mcmc_seed + refit_id,
             cores=cores,
+            prior_delta=prior_delta,
         )
         elapsed = time.perf_counter() - started
 
@@ -692,6 +703,7 @@ def run_backtest(
     *,
     models: tuple[str, ...] | None = None,
     cores: int | None = None,
+    prior_delta: tuple[float, float] = M.PRIOR_DELTA,
 ) -> tuple[pd.DataFrame, list[RefitRecord]]:
     """Walk forward through the out-of-sample period producing daily forecasts.
 
@@ -714,6 +726,10 @@ def run_backtest(
         in parallel; any caller doing that must guard its entry point (see
         ``models.sample_garch_posterior``). Does not affect results -- chain seeds are
         derived from ``config.mcmc_seed`` regardless of how the chains are scheduled.
+    prior_delta:
+        The ``Beta`` prior on ``delta``, defaulting to the frozen D4 value. Used only by
+        the Stage 6 prior-sensitivity check, which writes to its own directory; see
+        ``build_bayes_paths``.
 
     Returns
     -------
@@ -804,7 +820,7 @@ def run_backtest(
 
     if any(model in BAYES_MODELS for model in wanted):
         bayes_paths, bayes_records, bayes_distributions = build_bayes_paths(
-            frame, config, cores=cores
+            frame, config, cores=cores, prior_delta=prior_delta
         )
         paths.update(bayes_paths)
         records.extend(bayes_records)

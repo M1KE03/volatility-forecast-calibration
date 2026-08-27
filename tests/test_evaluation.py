@@ -1,4 +1,4 @@
-"""Stage 4 tests for ``src.evaluation``.
+"""Stage 4 and 5 tests for ``src.evaluation``.
 
 Five categories, kept separate because they fail for different reasons:
 
@@ -18,7 +18,15 @@ Five categories, kept separate because they fail for different reasons:
   observed returns may depend on the volatility proxy. The proxy is scrambled and every
   calibration number must come back bit-identical.
 - **Refusal tests** pin D28: a missing forecast is an error, not a row to drop, so that
-  no statistic is computed on a sample the table does not name.
+  no statistic is computed on a sample the table does not name. The regime tables add
+  D33's floor: a subsample below thirty days is refused rather than printed beside
+  subsamples in the hundreds.
+
+The Stage 5 block at the end covers the regime split. Two of its tests exist to keep
+decisions from being tidied away by a later reader: that the regime VaR table runs Kupiec
+and deliberately *not* Christoffersen (D32, because a regime subsample's consecutive rows
+can be months apart), and that the label the evaluation layer splits on is the lagged one
+the data layer built.
 """
 
 from __future__ import annotations
@@ -739,4 +747,175 @@ def test_the_decomposition_reports_every_regime_with_its_own_n(
         at_99 = block[block["nominal"] == 0.99]
         assert at_99.loc[at_99["regime"] == "all", "n"].item() == sum(
             at_99.loc[at_99["regime"] == r, "n"].item() for r in E.REGIME_ORDER
+        )
+
+
+# --- Regime-conditional tables (Stage 5) ------------------------------------------
+
+
+def test_the_regime_floor_is_a_stated_constant() -> None:
+    """D33. A number this consequential should not be a literal inside a loop."""
+    assert E.MIN_REGIME_OBSERVATIONS == 30
+
+
+def test_a_regime_subsample_below_the_floor_is_refused(scored: pd.DataFrame) -> None:
+    """A coverage estimate on twenty days is not a number.
+
+    Printing it beside estimates on eight hundred invites exactly the over-reading the
+    regime tables exist to prevent, so it raises rather than appearing with a small
+    ``n`` and hoping the reader notices. Never fires on the VIX regimes -- the smallest
+    is 341 days -- and guards the further subsetting Stage 6 does.
+    """
+    thin = scored.copy()
+    stressed = thin.index[thin["regime"] == "stressed"]
+    thin.loc[stressed[10:], "regime"] = "normal"
+    with pytest.raises(ValueError, match="below the 30-day floor"):
+        E.regime_coverage_table(thin, ("garch_mle",), sample_label="thin")
+
+
+def test_every_regime_table_reports_n_and_accounts_for_every_day(
+    scored: pd.DataFrame,
+) -> None:
+    """The regimes partition the sample: no day is scored twice and none is dropped."""
+    own_days = int(
+        (scored["model"].eq("garch_mle") & scored["exceedance"].notna()).sum()
+    )
+    var_table = E.regime_var_table(scored, ("garch_mle",), sample_label="own days")
+    assert list(var_table["regime"]) == list(E.REGIME_ORDER)
+    assert var_table["n"].sum() == own_days
+
+    coverage = E.regime_coverage_table(
+        scored, ("garch_mle",), sample_label="own days", levels=(0.95,)
+    )
+    assert coverage["n"].sum() == own_days
+
+
+def test_regime_breaches_sum_to_the_full_sample_count(scored: pd.DataFrame) -> None:
+    """The regime split re-partitions Stage 4's number rather than recomputing it."""
+    full = E.var_backtest_table(scored, ("garch_mle",), sample_label="own days")
+    by_regime = E.regime_var_table(scored, ("garch_mle",), sample_label="own days")
+    assert by_regime["breaches"].sum() == full["breaches"].iloc[0]
+
+
+def test_regime_coverage_aggregates_to_the_overall_coverage(
+    scored: pd.DataFrame,
+) -> None:
+    """Weighted by ``n``, the per-regime coverages must return the pooled figure."""
+    overall = E.coverage_table(
+        scored, ("garch_bayes",), sample_label="own days", levels=(0.95,)
+    )
+    by_regime = E.regime_coverage_table(
+        scored, ("garch_bayes",), sample_label="own days", levels=(0.95,)
+    )
+    pooled = (by_regime["empirical"] * by_regime["n"]).sum() / by_regime["n"].sum()
+    assert pooled == pytest.approx(overall["empirical"].iloc[0])
+
+
+def test_regime_intervals_bracket_their_point_estimates(scored: pd.DataFrame) -> None:
+    for table in (
+        E.regime_coverage_table(scored, B.HEADLINE_MODELS, sample_label="own"),
+        E.regime_var_table(scored, B.HEADLINE_MODELS, sample_label="own"),
+        E.regime_loss_table(scored, B.HEADLINE_MODELS, sample_label="own"),
+    ):
+        estimate = table["empirical"] if "empirical" in table else (
+            table["rate"] if "rate" in table else table["mean"]
+        )
+        assert (table["ci_lower"] <= estimate).all()
+        assert (estimate <= table["ci_upper"]).all()
+
+
+def test_the_smallest_regime_gets_the_widest_interval(scored: pd.DataFrame) -> None:
+    """The point of putting error bars on a crisis subsample.
+
+    Stressed days are 347 of 2,134 and arrive in a handful of long runs, so the
+    effective number of independent blocks is smaller still. A difference that fits
+    inside that interval is not one this sample can see, and the figure has to show it.
+    """
+    table = E.regime_var_table(scored, ("garch_mle",), sample_label="own").set_index(
+        "regime"
+    )
+    width = table["ci_upper"] - table["ci_lower"]
+    assert width["stressed"] > width["calm"]
+    assert width["stressed"] > width["normal"]
+
+
+def test_covers_nominal_describes_the_interval_rather_than_judging_the_model(
+    scored: pd.DataFrame,
+) -> None:
+    """``covers_nominal`` must be exactly the interval containing the nominal value."""
+    coverage = E.regime_coverage_table(scored, B.HEADLINE_MODELS, sample_label="own")
+    expected = (coverage["ci_lower"] <= coverage["nominal"]) & (
+        coverage["nominal"] <= coverage["ci_upper"]
+    )
+    assert coverage["covers_nominal"].equals(expected)
+
+    var_table = E.regime_var_table(scored, B.HEADLINE_MODELS, sample_label="own")
+    expected = (var_table["ci_lower"] <= var_table["nominal_rate"]) & (
+        var_table["nominal_rate"] <= var_table["ci_upper"]
+    )
+    assert var_table["covers_nominal"].equals(expected)
+
+
+def test_the_regime_var_table_runs_kupiec_and_not_christoffersen(
+    scored: pd.DataFrame,
+) -> None:
+    """D32, pinned so it cannot be 'completed' by someone tidying up later.
+
+    Kupiec tests a count against a rate and is untroubled by a subsample. Christoffersen
+    counts transitions between *consecutive* observations, and consecutive rows of a
+    regime subsample can be months apart -- its "yesterday" would be fictitious, and a
+    p-value from fictitious transitions is worse than none, because it looks like the
+    money test having been run.
+    """
+    table = E.regime_var_table(scored, B.HEADLINE_MODELS, sample_label="own")
+    assert "kupiec_p" in table.columns
+    assert not [c for c in table.columns if "independence" in c or "conditional" in c]
+
+
+def test_regime_tables_carry_the_sample_label(scored: pd.DataFrame) -> None:
+    for builder in (E.regime_loss_table, E.regime_coverage_table, E.regime_var_table):
+        table = builder(scored, ("garch_mle",), sample_label="own days")
+        assert (table["sample"] == "own days").all()
+
+
+def test_regime_loss_table_rejects_an_unknown_loss(scored: pd.DataFrame) -> None:
+    with pytest.raises(KeyError, match="unknown loss"):
+        E.regime_loss_table(
+            scored, ("garch_mle",), sample_label="own", loss="not_a_loss"
+        )
+
+
+def test_the_regime_label_is_the_lagged_one_the_data_layer_built(
+    forecasts: pd.DataFrame,
+) -> None:
+    """The no-look-ahead statement the regime figure is obliged to make, as a test.
+
+    The regime split conditions on information from day ``t-1``: ``data.assign_vix_regime``
+    owns the lag and ``test_data.py`` pins that. What this adds is that the label the
+    *evaluation* layer splits on is that same column, carried through the backtest
+    unchanged -- so the figure's claim is about the labels actually used, not about a
+    function elsewhere that happens to be correct.
+    """
+    frame_path = Path("data/processed/analysis_frame.csv")
+    if not frame_path.exists():  # pragma: no cover - depends on local state
+        pytest.skip(f"{frame_path} not present; run `python run_all.py --stage data`")
+    frame = pd.read_csv(frame_path, index_col=0, parse_dates=True)
+
+    block = forecasts[forecasts["model"] == "garch_mle"].set_index("date")
+    expected = frame.loc[block.index, "regime"]
+    assert (block["regime"].to_numpy() == expected.to_numpy()).all()
+
+
+def test_regime_statistics_ignore_the_volatility_proxy(forecasts: pd.DataFrame) -> None:
+    """The Stage 4 separation, re-asserted where the subsampling could have broken it."""
+    rng = np.random.default_rng(SEED)
+    scrambled = forecasts.copy()
+    scrambled["proxy_var"] = rng.permutation(scrambled["proxy_var"].to_numpy()) * 3.0
+
+    base = E.score_forecasts(forecasts)
+    other = E.score_forecasts(scrambled)
+    for builder in (E.regime_coverage_table, E.regime_var_table):
+        pd.testing.assert_frame_equal(
+            builder(base, B.HEADLINE_MODELS, sample_label="own"),
+            builder(other, B.HEADLINE_MODELS, sample_label="own"),
         )

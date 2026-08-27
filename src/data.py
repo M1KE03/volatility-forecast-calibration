@@ -419,6 +419,94 @@ def assign_vix_regime(
     )
 
 
+#: Window for the trailing-volatility regime sensitivity: one trading month.
+TRAILING_VOL_WINDOW = 21
+
+
+def trailing_vol_thresholds(
+    parkinson_var: pd.Series,
+    *,
+    window: int = TRAILING_VOL_WINDOW,
+    train_end: str = TRAIN_END,
+) -> tuple[float, float]:
+    """Tercile cut-points of trailing realised volatility, from the **warm-up only**.
+
+    The governing plan's regime sensitivity: repeat the regime analysis on terciles of
+    trailing 21-day Parkinson volatility instead of the VIX bands, and confirm the
+    conclusions do not hinge on the VIX thresholds.
+
+    **The thresholds come from the training window and nothing else**, which is the
+    whole reason this function exists separately from the labeller. Terciles computed
+    over the full sample would be a function of the evaluation period, so each day's
+    label would depend on days that had not happened yet -- a look-ahead that would be
+    invisible in the output and would quietly define the crisis regime using the
+    crisis. The locked VIX thresholds have this property by construction, at 15 and 25;
+    this alternative has to earn it.
+    """
+    trailing = (
+        pd.to_numeric(parkinson_var, errors="coerce")
+        .rolling(window)
+        .mean()
+        .shift(1)
+    )
+    warm_up = trailing.loc[:train_end].dropna()
+    if warm_up.empty:
+        raise ValueError(
+            f"no trailing-volatility observations on or before {train_end}; the "
+            "thresholds must be estimated on the warm-up window alone"
+        )
+    low, high = warm_up.quantile([1 / 3, 2 / 3])
+    return float(low), float(high)
+
+
+def assign_trailing_vol_regime(
+    parkinson_var: pd.Series,
+    *,
+    window: int = TRAILING_VOL_WINDOW,
+    thresholds: tuple[float, float] | None = None,
+    train_end: str = TRAIN_END,
+) -> pd.Series:
+    """Label each date from the **trailing** realised variance through ``t-1``.
+
+    The robustness counterpart to ``assign_vix_regime``, and lagged the same way: the
+    rolling mean is taken through ``t-1``, so the label for date ``t`` is in the
+    information set when the forecast for ``t`` is made. Passing an already-lagged
+    series would double-lag it; this function does the lagging itself.
+
+    ``thresholds`` defaults to ``trailing_vol_thresholds`` on the same series, which
+    reads the warm-up window only. It is exposed so a caller can pin them explicitly,
+    never so they can be re-estimated on the evaluation period.
+
+    Labels reuse ``REGIME_ORDER`` -- calm, normal, stressed -- because they play the
+    same role and every downstream table already orders on it. They are *not* the VIX
+    regimes and must not be presented as though a row could be compared across the two.
+    """
+    if thresholds is None:
+        thresholds = trailing_vol_thresholds(
+            parkinson_var, window=window, train_end=train_end
+        )
+    low, high = thresholds
+    if not low <= high:
+        raise ValueError(f"thresholds must be ordered, got {thresholds}")
+
+    trailing = (
+        pd.to_numeric(parkinson_var, errors="coerce")
+        .rolling(window)
+        .mean()
+        .shift(1)
+    )
+    labels = np.where(
+        trailing < low,
+        REGIME_CALM,
+        np.where(trailing > high, REGIME_STRESSED, REGIME_NORMAL),
+    )
+    labels = np.where(trailing.isna().to_numpy(), None, labels)
+    return pd.Series(
+        pd.Categorical(labels, categories=list(REGIME_ORDER), ordered=True),
+        index=parkinson_var.index,
+        name="trailing_vol_regime",
+    )
+
 def build_analysis_frame(
     spy_raw: pd.DataFrame,
     vix_raw: pd.DataFrame,

@@ -740,6 +740,58 @@ def test_priors_are_the_ones_frozen_at_d4() -> None:
     assert M.PRIOR_NU_LOWER == 4.0
 
 
+def test_the_delta_prior_default_is_the_frozen_one_everywhere_it_is_settable() -> None:
+    """The prior-sensitivity check must not be able to become the default run.
+
+    Stage 6 owes a sensitivity check across the three ``delta`` candidates, and that
+    turned out to need a second and third Bayesian backtest rather than a paragraph. The
+    alternative prior is therefore threaded through the sampler and the backtest as an
+    argument -- which creates a way for a one-line edit to re-specify the model that
+    every headline number was computed under, without touching ``PRIOR_DELTA`` and so
+    without tripping the test above.
+
+    This pins the other half: wherever the prior is settable, its default is the frozen
+    value. A sensitivity run has to say so at the call site.
+    """
+    import inspect
+
+    from src import backtest as B
+
+    for function in (M._build_pymc_model, M.sample_garch_posterior):
+        default = inspect.signature(function).parameters["prior_delta"].default
+        assert default == M.PRIOR_DELTA, function.__name__
+
+    for function in (B.build_bayes_paths, B.run_backtest):
+        default = inspect.signature(function).parameters["prior_delta"].default
+        assert default == M.PRIOR_DELTA, function.__name__
+
+
+def test_an_alternative_delta_prior_reaches_the_model_graph() -> None:
+    """And the other half again: the argument must actually do something.
+
+    A default-valued parameter that is silently ignored would pass the test above and
+    make the whole sensitivity check vacuous -- three runs producing one answer, read as
+    evidence of robustness. Checked on the graph rather than by sampling, so it costs
+    milliseconds: the ``delta`` prior's parameters are read back off the built model.
+    """
+    pytest.importorskip("pymc")
+
+    theta = np.array([0.05, 0.05, 0.10, 0.85, 7.0])  # percent scale, as D4 specifies
+    returns = _simulate_garch_t(200, theta, seed=11)
+    h0 = float(np.var(returns, ddof=1))
+
+    def delta_prior_of(model) -> tuple[float, float]:
+        # A pm.Beta RV's owner carries (rng, size, alpha, beta); the prior is the last two.
+        alpha, beta = model["delta"].owner.inputs[-2:]
+        return (float(alpha.eval()), float(beta.eval()))
+
+    frozen = M._build_pymc_model(returns, h0)
+    alternative = M._build_pymc_model(returns, h0, prior_delta=(10.0, 2.0))
+
+    assert delta_prior_of(frozen) == M.PRIOR_DELTA
+    assert delta_prior_of(alternative) == (10.0, 2.0)
+
+
 def test_the_delta_prior_does_not_vanish_at_the_stationarity_boundary() -> None:
     """Why D4 departed from the feasibility probe, as a property rather than a note.
 

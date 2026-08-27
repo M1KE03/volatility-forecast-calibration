@@ -742,3 +742,154 @@ def plot_interval_decomposition(
     ax.legend(loc="lower left", ncol=3)
     fig.tight_layout()
     return _finish(fig, out_path)
+
+
+# --- Stage 5 figures ---------------------------------------------------------------
+
+#: Regime palette, ordered calm -> stressed so the ramp reads as increasing severity.
+REGIME_COLOURS = {
+    "calm": "#7f9ec4",
+    "normal": "#31456b",
+    "stressed": "#b5482e",
+}
+
+
+def plot_regime_coverage(
+    regime_coverage: pd.DataFrame,
+    out_path: Path,
+    *,
+    models: tuple[str, ...],
+) -> Path:
+    """Coverage against nominal by regime, one panel per model, with bootstrap CIs.
+
+    The figure the research question asks for: does 99% still mean 99% when VIX > 25?
+
+    Error bars are stationary-block-bootstrap intervals computed *within* each regime,
+    and their width is part of the message rather than an apology for it. The stressed
+    regime is a few hundred days made of a small number of long runs, so its intervals
+    are wide and a difference that fits inside one is not a difference this sample can
+    see.
+
+    A marker below the diagonal is an interval that is too narrow -- the direction that
+    understates risk, and the only direction that matters for the use these forecasts
+    are put to.
+    """
+    apply_house_style()
+    fig, axes = plt.subplots(2, 2, figsize=(8.6, 7.2), sharex=True, sharey=True)
+
+    levels = sorted(regime_coverage["nominal"].unique())
+    offsets = np.linspace(-0.006, 0.006, len(REGIME_COLOURS))
+
+    for ax, model in zip(axes.flat, models):
+        block = regime_coverage[regime_coverage["model"] == model]
+        ax.plot(
+            [0.86, 1.005], [0.86, 1.005], color="black", linewidth=0.9,
+            linestyle="--", alpha=0.6, zorder=1,
+        )
+        for offset, (regime, colour) in zip(offsets, REGIME_COLOURS.items()):
+            rows = block[block["regime"] == regime].sort_values("nominal")
+            if rows.empty:
+                continue
+            x = rows["nominal"].to_numpy() + offset
+            y = rows["empirical"].to_numpy()
+            ax.errorbar(
+                x,
+                y,
+                yerr=[y - rows["ci_lower"].to_numpy(), rows["ci_upper"].to_numpy() - y],
+                fmt="o",
+                markersize=4.5,
+                linewidth=1.1,
+                capsize=2.5,
+                color=colour,
+                label=f"{regime} (n = {rows['n'].iloc[0]:,})",
+                zorder=2,
+            )
+        short = MODEL_LABELS.get(model, model).split(" (")[0]
+        ax.set_title(short, fontsize=9)
+        ax.set_xticks(levels)
+        ax.set_xlim(0.875, 1.005)
+        ax.legend(loc="upper left", fontsize=7)
+
+    for ax in axes[-1]:
+        ax.set_xlabel("nominal coverage")
+    for ax in axes[:, 0]:
+        ax.set_ylabel("empirical coverage")
+
+    fig.suptitle(
+        "Does a 99% interval still contain 99% of returns when VIX > 25?",
+        fontsize=10,
+        fontweight="semibold",
+    )
+    fig.tight_layout()
+    return _finish(fig, out_path)
+
+
+def plot_regime_var_rate(
+    regime_var: pd.DataFrame,
+    out_path: Path,
+    *,
+    models: tuple[str, ...],
+    var_level: float = 0.99,
+) -> Path:
+    """99% VaR breach rate by regime, with bootstrap intervals and the nominal line.
+
+    The companion to the hit-sequence timeline, and the figure that answers the regime
+    question for the tail specifically. A bar whose interval straddles the dashed line
+    is a rate this sample cannot distinguish from nominal; one clear of it is a model
+    breaching more often than it promised, in that regime.
+
+    Read it against the two-sided coverage panel rather than instead of it. They can
+    disagree, and where they do the model is putting the right *number* of breaches in
+    the wrong *tail* -- which a two-sided number cannot show and a risk manager cares
+    about more than either.
+    """
+    apply_house_style()
+    fig, ax = plt.subplots(figsize=(8.4, 4.2))
+
+    nominal_rate = 1.0 - var_level
+    regimes = [r for r in REGIME_COLOURS if r in set(regime_var["regime"])]
+    width = 0.8 / len(regimes)
+    positions = np.arange(len(models))
+
+    for offset, regime in enumerate(regimes):
+        rows = regime_var[regime_var["regime"] == regime].set_index("model")
+        rows = rows.reindex(list(models))
+        x = positions + offset * width
+        rate = rows["rate"].to_numpy()
+        ax.bar(
+            x,
+            rate,
+            width=width,
+            color=REGIME_COLOURS[regime],
+            label=regime,
+        )
+        ax.errorbar(
+            x,
+            rate,
+            yerr=[rate - rows["ci_lower"].to_numpy(), rows["ci_upper"].to_numpy() - rate],
+            fmt="none",
+            ecolor="black",
+            elinewidth=0.9,
+            capsize=2.5,
+            alpha=0.7,
+        )
+
+    ax.axhline(
+        nominal_rate,
+        color="black",
+        linewidth=1.0,
+        linestyle="--",
+        label=f"nominal {nominal_rate:.0%}",
+    )
+    ax.set_xticks(positions + width)
+    ax.set_xticklabels(
+        [MODEL_LABELS.get(m, m).split(" (")[0] for m in models], fontsize=8
+    )
+    ax.set_ylabel(f"{var_level:.0%} VaR breach rate")
+    ax.set_title(
+        f"{var_level:.0%} VaR breaches by regime: the GARCH models fail in the middle, "
+        "not in the crisis"
+    )
+    ax.legend(loc="upper right", ncol=4, fontsize=7.5)
+    fig.tight_layout()
+    return _finish(fig, out_path)

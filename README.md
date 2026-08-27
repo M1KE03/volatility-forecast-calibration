@@ -1,12 +1,13 @@
 # Trusting the Error Bars: Calibration of Frequentist vs Bayesian Volatility Forecasts
 
-**Status: Stage 4 complete. All four forecasters exist — both baselines, the frequentist
+**Status: Stages 4 and 5 complete. All four forecasters exist — both baselines, the frequentist
 GARCH(1,1)-t and the Bayesian GARCH(1,1)-t — plus two ablations, each with a forecast
 table over the 2,134-day evaluation window. The Bayesian model is fitted by NUTS at each
 of the 102 refit dates, 100 of which converged. The look-ahead audit covers both
 estimators. The evaluation layer scores all of it: point losses, PIT, interval coverage,
-Kupiec and Christoffersen, Diebold-Mariano, and block-bootstrap intervals throughout.
-Stage 5, the regime-conditional analysis, is next.**
+Kupiec and Christoffersen, Diebold-Mariano, the regime split, and block-bootstrap
+intervals throughout. Stage 6, robustness, is next; its prior-sensitivity backtests are
+running.**
 
 Stage numbers follow [`docs/project1-implementation-plan.md`](docs/project1-implementation-plan.md),
 the governing plan.
@@ -180,7 +181,8 @@ python run_all.py --stage backtest  # walk-forward loop, baselines + MLE GARCH (
 python run_all.py --stage bayes     # the Bayesian track, 102 NUTS fits (~95 min)
 python run_all.py --stage evaluate  # losses, coverage, VaR backtests, DM, bootstrap CIs
 python run_all.py --stage figures   # the report figures, from the evaluation tables
-python run_all.py --all             # run the full pipeline
+python run_all.py --stage priors    # prior sensitivity, ~190 min, opt-in (not in --all)
+python run_all.py --all             # run the pipeline (everything except `priors`)
 ```
 
 **The backtest is two stages, for cost rather than design.** `--stage backtest` refits
@@ -200,9 +202,15 @@ window. Two of the 102 did, so `garch_bayes` has 2,092 of the 2,134 rows.
 pass `--refresh` to re-download, which deliberately replaces that snapshot. It prints the
 full data quality report and writes `data/processed/analysis_frame.csv`.
 
-`--stage evaluate` reads `forecasts.csv` and refits nothing, writing six `eval_*.csv`
+`--stage evaluate` reads `forecasts.csv` and refits nothing, writing eleven `eval_*.csv`
 tables to `data/processed/`; `--stage figures` draws only from those tables, so a figure
 and the number it plots cannot disagree. Both run in seconds.
+
+`--stage priors` is the one stage `--all` leaves out. It re-runs the Bayesian backtest
+under each of the two `delta` priors the design considered and rejected -- about 190
+minutes for a robustness check that produces no headline number -- and writes to
+`data/processed/prior_sensitivity/`. It cannot touch `forecasts.csv`: the merge that
+rebuilds that file iterates over a fixed set of tracks, which these runs are not in.
 
 ## The scale convention
 
@@ -377,6 +385,47 @@ the `garch_mle_normal` ablation at 2.6e-4.
 
 Regime-conditional versions of all of this, with bootstrap confidence intervals, are
 Stage 5.
+
+### What the regime split establishes
+
+Full tables in `data/processed/eval_regime_*.csv`, figures 12-13, presented in
+`notebooks/02_results.ipynb`. Days are labelled by the **lagged** VIX close, so the
+conditioning information was available when the forecast was made; every estimate carries
+a stationary-block-bootstrap interval computed within the regime.
+
+**Calibration survives the crisis and fails in the quiet.** 99% VaR breach rate, with 95%
+bootstrap intervals:
+
+| model | calm (n=757) | normal (n=1,030) | stressed (n=347) |
+|---|---|---|---|
+| `garch_mle` | 1.19% [0.53, 1.85] | **2.33% [1.65, 3.11]** | 1.15% [0.29, 2.02] |
+| `garch_bayes` | 1.19% [0.53, 1.98] | **2.31% [1.51, 3.12]** | 1.47% [0.29, 2.93] |
+| `ewma` | 1.59% [0.79, 2.38] | 2.91% [2.04, 3.88] | 3.46% [1.44, 6.05] |
+| `yesterday` | 3.70% | 4.08% | 4.90% |
+
+Both GARCH models are indistinguishable from nominal in calm *and* in stress, and clearly
+too high in the middle band. The baselines degrade monotonically with volatility -- the
+pattern one would have predicted for all four. The project asks whether 99% still means
+99% when VIX > 25; for the GARCH models the answer is yes, and the failure is in the
+regime nobody would have examined.
+
+**The mechanism is tail misallocation.** At the 99% two-sided level in the normal regime,
+`garch_mle` puts **14 breaches below the interval and none above**, against 5.2 expected
+in each tail. Total coverage there is 0.9864 against a nominal 0.99 -- a near miss -- while
+every breach is a loss. A two-sided coverage number cannot show this, which is why the
+tails are counted separately everywhere in this project.
+
+**The sensitivity agrees.** Under terciles of trailing 21-day Parkinson volatility, with
+cut points estimated on the warm-up window alone so the labels carry no look-ahead either,
+the GARCH models are closest to nominal in the *top* tercile (1.35%, Kupiec p = 0.29) and
+worst in the bottom one (2.06%, p = 0.012). The two definitions disagree about which
+non-stressed bucket is weakest and agree that these models are not worse in stress.
+
+**Two things this does not establish.** The stressed intervals are wide -- [0.29%, 2.02%]
+admits rates from a third of nominal to double it -- so "survives stress" means this sample
+cannot show it failing, not that it is known to hold. And *why* the middle band is the weak
+spot is a conjecture: 15-25 is where regime transitions happen and a GARCH forecast lags a
+change in level by construction, but this design cannot test that.
 
 ### The analysis frame
 

@@ -570,3 +570,96 @@ def test_scale_proxy_rejects_a_degenerate_constant(analysis_frame: pd.DataFrame)
     for bad in (0.0, -1.0, float("nan"), float("inf")):
         with pytest.raises(ValueError, match="finite and positive"):
             D.scale_proxy(analysis_frame["parkinson_var"], c=bad)
+
+
+# --- The trailing-volatility regime sensitivity (Stage 5) --------------------------
+
+
+def test_trailing_vol_regime_uses_only_information_through_yesterday() -> None:
+    """The same lag discipline as ``assign_vix_regime``, and for the same reason.
+
+    The label attached to date t must be computable by someone standing at the close of
+    t-1. Corrupting the proxy from a cut date onward must leave every label strictly
+    before that date untouched.
+    """
+    rng = np.random.default_rng(20260827)
+    index = pd.bdate_range("2014-01-02", periods=600)
+    proxy = pd.Series(np.abs(rng.normal(1e-4, 3e-5, size=600)), index=index)
+
+    thresholds = D.trailing_vol_thresholds(proxy, train_end="2015-06-30")
+    clean = D.assign_trailing_vol_regime(proxy, thresholds=thresholds)
+
+    cut = index[400]
+    corrupted_proxy = proxy.copy()
+    corrupted_proxy.loc[cut:] *= 50.0
+    corrupted = D.assign_trailing_vol_regime(corrupted_proxy, thresholds=thresholds)
+
+    before = index < cut
+    assert (clean[before].astype(str) == corrupted[before].astype(str)).all()
+
+
+def test_corrupting_the_proxy_does_move_later_trailing_vol_labels() -> None:
+    """The vacuity check beside the test above: the corruption has to bite somewhere."""
+    rng = np.random.default_rng(20260827)
+    index = pd.bdate_range("2014-01-02", periods=600)
+    proxy = pd.Series(np.abs(rng.normal(1e-4, 3e-5, size=600)), index=index)
+    thresholds = D.trailing_vol_thresholds(proxy, train_end="2015-06-30")
+
+    clean = D.assign_trailing_vol_regime(proxy, thresholds=thresholds)
+    corrupted_proxy = proxy.copy()
+    corrupted_proxy.iloc[400:] *= 50.0
+    corrupted = D.assign_trailing_vol_regime(corrupted_proxy, thresholds=thresholds)
+
+    after = index > index[420]
+    assert (clean[after].astype(str) != corrupted[after].astype(str)).any()
+
+
+def test_trailing_vol_thresholds_cannot_see_the_evaluation_period() -> None:
+    """The reason the cut-points are a separate function from the labeller.
+
+    Terciles taken over the full sample would be a function of the evaluation period, so
+    every label would depend on days that had not happened yet -- and the crisis regime
+    would be defined using the crisis. The locked VIX thresholds have this property by
+    construction at 15 and 25; this alternative has to earn it.
+    """
+    frame_path = Path("data/processed/analysis_frame.csv")
+    if not frame_path.exists():  # pragma: no cover - depends on local state
+        pytest.skip(f"{frame_path} not present; run `python run_all.py --stage data`")
+    frame = pd.read_csv(frame_path, index_col=0, parse_dates=True)
+
+    baseline = D.trailing_vol_thresholds(frame["parkinson_var"])
+    corrupted = frame["parkinson_var"].copy()
+    corrupted.loc["2017-01-03":] *= 100.0
+    assert D.trailing_vol_thresholds(corrupted) == baseline
+
+
+def test_trailing_vol_thresholds_do_move_with_warm_up_data() -> None:
+    """And the vacuity check: warm-up data must matter, or the test above is empty."""
+    frame_path = Path("data/processed/analysis_frame.csv")
+    if not frame_path.exists():  # pragma: no cover - depends on local state
+        pytest.skip(f"{frame_path} not present; run `python run_all.py --stage data`")
+    frame = pd.read_csv(frame_path, index_col=0, parse_dates=True)
+
+    baseline = D.trailing_vol_thresholds(frame["parkinson_var"])
+    bumped = frame["parkinson_var"].copy()
+    bumped.loc[:D.TRAIN_END] *= 3.0
+    assert D.trailing_vol_thresholds(bumped) != baseline
+
+
+def test_trailing_vol_labels_are_the_ordered_regime_categories() -> None:
+    """They reuse REGIME_ORDER because they play the same role -- but they are a
+    different partition, and no table may compare a row across the two definitions."""
+    rng = np.random.default_rng(20260827)
+    index = pd.bdate_range("2014-01-02", periods=400)
+    proxy = pd.Series(np.abs(rng.normal(1e-4, 3e-5, size=400)), index=index)
+    labels = D.assign_trailing_vol_regime(proxy, train_end="2015-06-30")
+    assert list(labels.cat.categories) == list(D.REGIME_ORDER)
+    assert labels.iloc[: D.TRAILING_VOL_WINDOW].isna().all()
+
+
+def test_unordered_trailing_vol_thresholds_are_refused() -> None:
+    rng = np.random.default_rng(20260827)
+    index = pd.bdate_range("2014-01-02", periods=200)
+    proxy = pd.Series(np.abs(rng.normal(1e-4, 3e-5, size=200)), index=index)
+    with pytest.raises(ValueError, match="ordered"):
+        D.assign_trailing_vol_regime(proxy, thresholds=(5.0, 1.0))

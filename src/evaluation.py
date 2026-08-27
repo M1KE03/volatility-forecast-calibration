@@ -990,3 +990,199 @@ def decomposition_table(
                     }
                 )
     return pd.DataFrame(rows)
+
+
+# --- Regime-conditional tables (Stage 5) ------------------------------------------
+#
+# Everything below splits a Stage 4 statistic on the lagged-VIX label and attaches a
+# block-bootstrap interval. The error bars are not decoration: the stressed regime is
+# 341 of the 2,092 days the Bayesian model forecasts, and its 99% VaR hit sequence holds
+# four or five breaches. An interval wide enough to swallow the effect is the honest
+# answer, and it is the answer the governing plan put on the never-cut list.
+
+#: Below this many days a subsample is refused rather than reported (D33).
+#:
+#: A coverage estimate on twenty days is not a number, and printing it beside estimates
+#: on eight hundred invites exactly the over-reading the regime tables exist to prevent.
+#: Never fires on the VIX regimes -- the smallest is 341 days -- and exists for the
+#: trailing-volatility tercile sensitivity and anything else that subsets further.
+MIN_REGIME_OBSERVATIONS = 30
+
+
+def _regime_blocks(
+    scored: pd.DataFrame,
+    model: str,
+    dates: pd.DatetimeIndex | None,
+    column: str,
+) -> list[tuple[str, np.ndarray, pd.DataFrame]]:
+    """One date-ordered subsample per regime, for a model and a column.
+
+    Date order matters and is not incidental: the block bootstrap below resamples runs
+    of consecutive rows, so a shuffled subsample would destroy the dependence the blocks
+    exist to preserve.
+    """
+    block = _block(scored, model, dates)
+    available = block[column].notna()
+    out = []
+    for regime in REGIME_ORDER:
+        rows = block.loc[available & (block["regime"] == regime)]
+        if len(rows) < MIN_REGIME_OBSERVATIONS:
+            raise ValueError(
+                f"{model!r} has {len(rows)} usable days in the {regime!r} regime, below "
+                f"the {MIN_REGIME_OBSERVATIONS}-day floor. A statistic on a subsample "
+                "this small is not reportable beside one on hundreds of days; widen the "
+                "regime definition or drop the split rather than printing it (D33)."
+            )
+        out.append((regime, rows[column].to_numpy(), rows))
+    return out
+
+
+def regime_loss_table(
+    scored: pd.DataFrame,
+    models: tuple[str, ...],
+    *,
+    sample_label: str,
+    dates: pd.DatetimeIndex | None = None,
+    loss: str = "qlike",
+    confidence: float = 0.95,
+) -> pd.DataFrame:
+    """Mean loss per model per regime, each with a block-bootstrap interval.
+
+    The QLIKE *level* is not comparable across regimes -- a stressed day has a larger
+    proxy variance, so every model's loss is larger there -- and only the ordering of
+    models within a regime is. That is a property of the loss, not of the models, and
+    the report has to say so rather than let a rising column read as deterioration.
+    """
+    from . import bootstrap as BS
+
+    if loss not in LOSS_FUNCTIONS:
+        raise KeyError(
+            f"unknown loss {loss!r}; expected one of {sorted(LOSS_FUNCTIONS)}"
+        )
+
+    rows = []
+    for model in models:
+        for regime, values, _ in _regime_blocks(scored, model, dates, loss):
+            ci = BS.bootstrap_mean(values, confidence=confidence)
+            rows.append(
+                {
+                    "sample": sample_label,
+                    "model": model,
+                    "regime": regime,
+                    "loss": loss,
+                    "n": int(values.size),
+                    "mean": ci.point_estimate,
+                    "ci_lower": ci.lower,
+                    "ci_upper": ci.upper,
+                    "confidence": confidence,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def regime_coverage_table(
+    scored: pd.DataFrame,
+    models: tuple[str, ...],
+    *,
+    sample_label: str,
+    dates: pd.DatetimeIndex | None = None,
+    levels: tuple[float, ...] = (0.90, 0.95, 0.99),
+    confidence: float = 0.95,
+) -> pd.DataFrame:
+    """Empirical coverage per model, level and regime, with bootstrap intervals.
+
+    **The never-cut item** (governing plan §5): bootstrap CIs on every per-regime
+    coverage estimate.
+
+    The interval is a block bootstrap *within* the regime subsample, which conditions on
+    the observed regime labels -- the statistic being estimated is coverage **given**
+    stressed, so the days that are stressed are the sample, not a draw. The alternative,
+    resampling the whole series and recomputing the regime statistic per replicate,
+    answers a different question (it treats regime membership as random too) and returns
+    a wider interval for that reason rather than this one.
+
+    One consequence worth stating in the report rather than discovering in review:
+    regimes are persistent, so a regime subsample is a modest number of long runs, and
+    the effective number of independent blocks in it is much smaller than its ``n``
+    suggests. That is *why* these intervals are wide.
+    """
+    from . import bootstrap as BS
+
+    rows = []
+    for model in models:
+        for level in levels:
+            key = level_key(level)
+            column = f"inside_{key}"
+            for regime, inside, block in _regime_blocks(scored, model, dates, column):
+                ci = BS.bootstrap_mean(inside, confidence=confidence)
+                returns = block["log_return"].to_numpy()
+                rows.append(
+                    {
+                        "sample": sample_label,
+                        "model": model,
+                        "regime": regime,
+                        "nominal": level,
+                        "n": int(inside.size),
+                        "empirical": ci.point_estimate,
+                        "ci_lower": ci.lower,
+                        "ci_upper": ci.upper,
+                        "confidence": confidence,
+                        "covers_nominal": bool(ci.lower <= level <= ci.upper),
+                        "n_below": int((returns < block[f"lo_{key}"].to_numpy()).sum()),
+                        "n_above": int((returns > block[f"hi_{key}"].to_numpy()).sum()),
+                        "mean_width": float(block[f"width_{key}"].mean()),
+                    }
+                )
+    return pd.DataFrame(rows)
+
+
+def regime_var_table(
+    scored: pd.DataFrame,
+    models: tuple[str, ...],
+    *,
+    sample_label: str,
+    dates: pd.DatetimeIndex | None = None,
+    var_level: float = 0.99,
+    confidence: float = 0.95,
+) -> pd.DataFrame:
+    """99% VaR breach rate per model per regime, with a bootstrap interval and Kupiec.
+
+    **Kupiec only, and Christoffersen deliberately absent (D32).** Kupiec tests a count
+    against a rate and is untroubled by a subsample: the days are still days, and their
+    order does not enter the statistic. Christoffersen's independence test is a
+    different matter -- it counts transitions between *consecutive* observations, and
+    consecutive rows of a regime subsample can be months apart. Its "yesterday" would be
+    fictitious, and a p-value computed from fictitious transitions is worse than no
+    p-value, because it looks like the money test having been run. Full-sample
+    Christoffersen is in ``eval_var_backtests.csv`` and is where that question is
+    answered.
+
+    The bootstrap interval on the rate is the honest uncertainty statement in its place.
+    """
+    from . import bootstrap as BS
+
+    nominal_rate = 1.0 - var_level
+    rows = []
+    for model in models:
+        for regime, hits, _ in _regime_blocks(scored, model, dates, "exceedance"):
+            ci = BS.bootstrap_mean(hits, confidence=confidence)
+            statistic, p_value = kupiec_pof_test(hits, nominal_rate)
+            rows.append(
+                {
+                    "sample": sample_label,
+                    "model": model,
+                    "regime": regime,
+                    "n": int(hits.size),
+                    "breaches": int(hits.sum()),
+                    "expected": nominal_rate * hits.size,
+                    "rate": ci.point_estimate,
+                    "ci_lower": ci.lower,
+                    "ci_upper": ci.upper,
+                    "confidence": confidence,
+                    "nominal_rate": nominal_rate,
+                    "covers_nominal": bool(ci.lower <= nominal_rate <= ci.upper),
+                    "kupiec_stat": statistic,
+                    "kupiec_p": p_value,
+                }
+            )
+    return pd.DataFrame(rows)

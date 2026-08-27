@@ -1010,8 +1010,20 @@ BAYES_CONVERGENCE: dict[str, float] = {
 _DIAGNOSTIC_VARS: tuple[str, ...] = PARAM_NAMES + ("delta",)
 
 
-def _build_pymc_model(returns: np.ndarray, h0: float):
+def _build_pymc_model(
+    returns: np.ndarray,
+    h0: float,
+    *,
+    prior_delta: tuple[float, float] = PRIOR_DELTA,
+):
     """The GARCH(1,1)-t model graph, on the percent scale. Imports PyMC lazily.
+
+    ``prior_delta`` defaults to the frozen D4 value and exists **only** so the Stage 6
+    prior-sensitivity check can re-run the backtest under the two candidates D4
+    considered and rejected. Passing anything else re-specifies the model, so it is an
+    explicit argument at every call site rather than a module constant that could be
+    edited: the frozen priors stay frozen, and a sensitivity run is visibly a different
+    run. ``test_the_delta_prior_default_is_the_frozen_one`` pins the default.
 
     **The same likelihood as ``garch11_t_loglik``, expressed for a different engine.**
     That is the project's central design constraint (see the module docstring), so the
@@ -1041,7 +1053,7 @@ def _build_pymc_model(returns: np.ndarray, h0: float):
         mu = pm.Normal("mu", 0.0, PRIOR_MU_SD)
         omega = pm.HalfNormal("omega", PRIOR_OMEGA_SD)
         alpha = pm.Beta("alpha", *PRIOR_ALPHA)
-        delta = pm.Beta("delta", *PRIOR_DELTA)
+        delta = pm.Beta("delta", *prior_delta)
         # alpha + beta < 1 by construction, so stationarity is never rejected.
         beta = pm.Deterministic("beta", (1.0 - alpha) * delta)
         nu = pm.Truncated(
@@ -1082,6 +1094,7 @@ def sample_garch_posterior(
     thin: int = 2,
     seed: int = 0,
     cores: int | None = None,
+    prior_delta: tuple[float, float] = PRIOR_DELTA,
 ) -> BayesianFit:
     """Sample the GARCH(1,1)-t posterior with PyMC/NUTS, seeded for reproducibility.
 
@@ -1119,6 +1132,11 @@ def sample_garch_posterior(
         multiprocessing spawns rather than forks, so an unguarded module re-imports
         itself in every worker and forks until the machine gives out, silently
         (problems-and-solutions 37). ``run_all.py`` is guarded; tests pass ``cores=1``.
+    prior_delta:
+        The ``Beta`` prior on ``delta``, defaulting to the frozen D4 value. Overridden
+        only by the Stage 6 prior-sensitivity check, which is a *different run* writing
+        to its own directory -- never a way of changing what the headline results were
+        computed under. See ``_build_pymc_model``.
     """
     import arviz as az
     import pymc as pm
@@ -1136,7 +1154,7 @@ def sample_garch_posterior(
     scaled = values * FIT_SCALE
     h0_scaled = h0_raw * FIT_SCALE**2
 
-    model = _build_pymc_model(scaled, h0_scaled)
+    model = _build_pymc_model(scaled, h0_scaled, prior_delta=prior_delta)
     with model:
         idata = pm.sample(
             draws=draws,

@@ -24,6 +24,7 @@ about an hour and a half.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -32,7 +33,21 @@ RAW_DIR = PROJECT_ROOT / "data" / "raw"
 PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 FIGURES_DIR = PROJECT_ROOT / "figures"
 
-STAGE_ORDER: tuple[str, ...] = ("data", "eda", "backtest", "bayes", "evaluate", "figures")
+STAGE_ORDER: tuple[str, ...] = (
+    "data", "eda", "backtest", "bayes", "evaluate", "figures", "priors",
+)
+
+#: What ``--all`` runs, and it is not every stage. ``priors`` is the Stage 6
+#: prior-sensitivity check: two more full Bayesian backtests, about 190 minutes, which
+#: produce no headline number and answer a robustness question. Including it would turn
+#: the one-command reproduction a stranger runs first into a five-hour job. It is
+#: selectable with ``--stage priors`` and is documented as opt-in.
+ALL_STAGES: tuple[str, ...] = tuple(s for s in STAGE_ORDER if s != "priors")
+
+#: The two ``delta`` priors D4 considered and rejected, re-run by ``--stage priors``.
+#: The frozen ``Beta(3, 1)`` is not among them: it is what every other stage already
+#: ran under, and re-running it would only reproduce ``forecasts.csv``.
+PRIOR_DELTA_CANDIDATES: tuple[tuple[float, float], ...] = ((10.0, 2.0), (1.0, 1.0))
 
 STAGE_HELP: dict[str, str] = {
     "data": "Download or load cached SPY and ^VIX bars, verify hashes, build the "
@@ -50,6 +65,10 @@ STAGE_HELP: dict[str, str] = {
     "evaluate": "Compute QLIKE and variance MSE, interval coverage, VaR backtests, "
                 "Diebold-Mariano comparisons, and block-bootstrap intervals.",
     "figures": "Render the figures used in report/report.md.",
+    "priors": "Prior sensitivity (D4's debt): re-run the Bayesian backtest under each "
+              "of the two rejected `delta` priors, writing to "
+              "data/processed/prior_sensitivity/ and never touching forecasts.csv. "
+              "About 190 minutes. Opt-in: not part of --all.",
 }
 
 
@@ -402,6 +421,7 @@ def stage_evaluate(args: argparse.Namespace) -> None:
 
     from src import backtest as B
     from src import bootstrap as BS
+    from src import data as D
     from src import evaluation as E
 
     forecast_path = PROCESSED_DIR / "forecasts.csv"
@@ -475,7 +495,41 @@ def stage_evaluate(args: argparse.Namespace) -> None:
         ),
         "eval_comparisons": E.comparison_table(scored, pairs),
         "eval_decomposition": E.decomposition_table(scored),
+        # Stage 5. Split on the *lagged* VIX label, so the conditioning information was
+        # available when the forecast was made -- the regime definition carries no
+        # look-ahead by construction, and the report says so where the figure appears.
+        "eval_regime_losses": E.regime_loss_table(
+            scored, scored_models, sample_label="own days"
+        ),
+        "eval_regime_coverage": E.regime_coverage_table(
+            scored, scored_models, sample_label="own days"
+        ),
+        "eval_regime_var": E.regime_var_table(
+            scored, scored_models, sample_label="own days"
+        ),
     }
+
+    # The regime sensitivity the plan asks for: terciles of trailing 21-day Parkinson
+    # volatility in place of the VIX bands, with the cut-points estimated on the warm-up
+    # window alone so the labels carry no look-ahead either. Third on the cut list, and
+    # cheap now that the tables are functions -- it is the same analysis under a
+    # different partition, not a second analysis.
+    frame = pd.read_csv(
+        PROCESSED_DIR / "analysis_frame.csv", index_col=0, parse_dates=True
+    )
+    thresholds = D.trailing_vol_thresholds(frame["parkinson_var"])
+    trailing = scored.assign(
+        regime=scored["date"]
+        .map(D.assign_trailing_vol_regime(frame["parkinson_var"]))
+        .astype(str)
+    )
+    label = "trailing-vol terciles"
+    tables["eval_regime_coverage_trailing"] = E.regime_coverage_table(
+        trailing, scored_models, sample_label=label
+    )
+    tables["eval_regime_var_trailing"] = E.regime_var_table(
+        trailing, scored_models, sample_label=label
+    )
 
     coverage = tables["eval_coverage"]
     own = coverage[coverage["sample"] == "own days"]
@@ -532,6 +586,52 @@ def stage_evaluate(args: argparse.Namespace) -> None:
         )
         print(f"  {level:.0%}  {cells}")
 
+    regime_var = tables["eval_regime_var"]
+    print()
+    print("99% VaR breach rate by regime, with 95% block-bootstrap intervals.")
+    print("Christoffersen is deliberately absent here: consecutive rows of a regime")
+    print("subsample can be months apart, so its transitions would be fictitious (D32).")
+    for model in headline:
+        cells = []
+        for row in regime_var[regime_var["model"] == model].itertuples():
+            flag = " " if row.covers_nominal else "*"
+            cells.append(
+                f"{row.regime}: {row.rate:.4f} [{row.ci_lower:.4f}, {row.ci_upper:.4f}]{flag}"
+            )
+        print(f"  {model:<18} " + "  ".join(cells))
+    print("  (* = the interval excludes the nominal 1% rate)")
+
+    regime_coverage = tables["eval_regime_coverage"]
+    at_99 = regime_coverage[regime_coverage["nominal"] == 0.99]
+    print()
+    print("99% two-sided coverage by regime, and where the breaches land.")
+    print("A model can hold its total coverage while putting every breach in one tail,")
+    print("which is a substantive failure for a risk model and not a rounding detail.")
+    for model in headline:
+        for row in at_99[at_99["model"] == model].itertuples():
+            print(
+                f"  {model:<18} {row.regime:<9} n={row.n:>5,}  "
+                f"coverage {row.empirical:.4f}  "
+                f"breaches {row.n_below:>3} below / {row.n_above:>3} above  "
+                f"({0.005 * row.n:.1f} expected each side)"
+            )
+
+    print()
+    print(
+        "Sensitivity: the same split on terciles of trailing 21-day Parkinson vol, "
+        f"cut at {thresholds[0]:.3e} and {thresholds[1]:.3e}"
+    )
+    print("(estimated on the warm-up window alone, so the labels carry no look-ahead).")
+    print("These buckets are not the VIX regimes and no row compares across the two.")
+    for model in headline:
+        cells = []
+        for row in tables["eval_regime_var_trailing"].itertuples():
+            if row.model != model:
+                continue
+            flag = " " if row.covers_nominal else "*"
+            cells.append(f"{row.regime}: {row.rate:.4f} (n={row.n:,}){flag}")
+        print(f"  {model:<18} " + "  ".join(cells))
+
     print()
     for name, table in tables.items():
         path = PROCESSED_DIR / f"{name}.csv"
@@ -577,10 +677,121 @@ def stage_figures(args: argparse.Namespace) -> None:
         figures.plot_interval_decomposition(
             decomposition, FIGURES_DIR / "11_interval_decomposition.png"
         ),
+        figures.plot_regime_coverage(
+            pd.read_csv(PROCESSED_DIR / "eval_regime_coverage.csv"),
+            FIGURES_DIR / "12_regime_coverage.png",
+            models=headline,
+        ),
+        figures.plot_regime_var_rate(
+            pd.read_csv(PROCESSED_DIR / "eval_regime_var.csv"),
+            FIGURES_DIR / "13_regime_var_rate.png",
+            models=headline,
+        ),
     ]
     print()
     for path in written:
         print(f"wrote {path}")
+
+
+def stage_priors(args: argparse.Namespace) -> None:
+    """Re-run the Bayesian backtest under each rejected ``delta`` prior (D4's debt).
+
+    **About 190 minutes: two more full Bayesian backtests.** That is the honest cost of
+    the obligation D4 incurred when it froze ``delta ~ Beta(3, 1)`` -- the log promised
+    prior sensitivity across all three candidates on evaluation-window forecasts, and
+    the check turned out to be a second and third backtest rather than a paragraph.
+
+    It is deliberately **not** part of ``--all``. It answers a robustness question and
+    produces no headline number; making an hour-and-a-half pipeline into a five-hour one
+    so that a Stage 6 check rides along would be a bad trade, and ``--all`` is the
+    command a stranger runs first.
+
+    **Nothing here can touch the headline results, and that is enforced structurally
+    rather than by care.** These runs write to ``data/processed/prior_sensitivity/``,
+    under their own file names, and never call ``save_track`` or ``merge_tracks`` -- the
+    machinery that rebuilds ``forecasts.csv`` iterates over ``backtest.TRACKS``, which
+    these are not in. The frozen priors stay frozen: ``models.PRIOR_DELTA`` is not
+    edited, the alternative is passed as an argument, and a test pins the default so a
+    sensitivity run cannot become the default run by a one-line change.
+
+    Everything except the prior is held identical to the production run -- same config,
+    same refit dates, same ``mcmc_seed``, so the same chain randomness. The prior is the
+    only thing that moves, which is what makes the comparison a sensitivity check rather
+    than two unrelated runs.
+    """
+    import json
+    from dataclasses import asdict
+
+    import pandas as pd
+
+    from src import backtest as B
+    from src import models as M
+
+    frame_path = PROCESSED_DIR / "analysis_frame.csv"
+    if not frame_path.exists():
+        raise SystemExit(
+            f"{frame_path} not found. Run `python run_all.py --stage data` first."
+        )
+    frame = pd.read_csv(frame_path, index_col=0, parse_dates=True)
+
+    out_dir = PROCESSED_DIR / "prior_sensitivity"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    config = B.BacktestConfig(mcmc_seed=args.seed)
+
+    print(f"frozen prior (D4)   : delta ~ Beta{M.PRIOR_DELTA}  -- not re-run here")
+    print(f"candidates          : {', '.join(f'Beta{c}' for c in PRIOR_DELTA_CANDIDATES)}")
+    print(f"output              : {out_dir}{os.sep}  (forecasts.csv is never touched)")
+    print(f"seed                : {config.mcmc_seed}, identical to the production run")
+    print("this stage takes about 190 minutes", flush=True)
+
+    for candidate in PRIOR_DELTA_CANDIDATES:
+        label = f"delta_{candidate[0]:g}_{candidate[1]:g}".replace(".", "p")
+        print()
+        print(f"--- delta ~ Beta{candidate} ---", flush=True)
+
+        forecasts, records = B.run_backtest(
+            frame,
+            config,
+            models=B.BAYES_MODELS,
+            prior_delta=candidate,
+        )
+        record_frame = pd.DataFrame([asdict(r) for r in records])
+
+        fits = record_frame[record_frame["model"] == B.BAYES_MODEL]
+        failed = fits[~fits["converged"]]
+        print(
+            f"  {len(fits) - len(failed)}/{len(fits)} refits converged, "
+            f"{fits['seconds_elapsed'].sum() / 60:.1f} min sampling"
+        )
+        for _, bad in failed.iterrows():
+            print(f"    !! {bad['refit_date'].date()} did NOT converge: {bad['message']}")
+
+        sub = forecasts[forecasts.model == B.BAYES_MODEL]
+        print(
+            f"  {sub['variance'].notna().sum():,} of {len(sub):,} days forecast; "
+            f"mean annualised vol {(sub['variance'].mean() * 252) ** 0.5:.2%}"
+        )
+
+        forecast_path = out_dir / f"forecasts_{label}.csv"
+        records_path = out_dir / f"refit_records_{label}.csv"
+        config_path = out_dir / f"config_{label}.json"
+
+        forecasts.to_csv(
+            forecast_path, index_label="date", date_format="%Y-%m-%d", lineterminator="\n"
+        )
+        record_frame.to_csv(
+            records_path, index=False, date_format="%Y-%m-%d", lineterminator="\n"
+        )
+        payload = asdict(config)
+        payload["estimation_window"] = config.estimation_window.value
+        payload["prior_delta"] = list(candidate)
+        payload["frozen_prior_delta"] = list(M.PRIOR_DELTA)
+        with config_path.open("w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2, sort_keys=True)
+            fh.write("\n")
+
+        for path in (forecast_path, records_path, config_path):
+            print(f"  wrote {path}")
 
 
 STAGES = {
@@ -590,6 +801,7 @@ STAGES = {
     "bayes": stage_bayes,
     "evaluate": stage_evaluate,
     "figures": stage_figures,
+    "priors": stage_priors,
 }
 
 
@@ -613,7 +825,9 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument(
         "--all",
         action="store_true",
-        help="Run every stage in order.",
+        help="Run the pipeline in order. Excludes `priors`, which is a 190-minute "
+             "robustness check rather than part of producing the results; run it "
+             "explicitly with `--stage priors`.",
     )
     parser.add_argument(
         "--refresh",
@@ -638,7 +852,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     """Parse arguments and dispatch to the requested stage(s)."""
     args = build_parser().parse_args(argv)
-    to_run = STAGE_ORDER if args.all else (args.stage,)
+    to_run = ALL_STAGES if args.all else (args.stage,)
     for name in to_run:
         print(f"=== stage: {name} ===", flush=True)
         STAGES[name](args)

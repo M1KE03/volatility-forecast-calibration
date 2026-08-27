@@ -1066,6 +1066,51 @@ refitted parameters — and `UniformityResult` carries `p_value_is_approximate` 
 rather than a comment, so the caveat survives into any table built from it. The histogram
 is the diagnostic; the test is a summary of it.
 
+### 1.17 Decided at Stage 5, before the regime tables were built (2026-08-27)
+
+Four decisions, all taken before a regime statistic existed. Two of them are refusals,
+which is the harder kind to make after seeing a table that would have been nicer with the
+extra number in it.
+
+**D32 — Kupiec per regime; Christoffersen deliberately not.**
+Kupiec tests a count against a rate. A regime subsample is still a set of days and their
+order does not enter the statistic, so it transfers without argument. Christoffersen's
+independence test does not: it counts transitions between *consecutive* observations, and
+consecutive rows of a regime subsample can be months apart. Its "yesterday" would be
+fictitious, and a p-value computed from fictitious transitions is worse than no p-value,
+because it looks like the money test having been run. The full-sample version stays in
+`eval_var_backtests.csv`, which is where that question is answered.
+`test_the_regime_var_table_runs_kupiec_and_not_christoffersen` pins the absence, so it
+cannot be filled in later by someone tidying up.
+
+**D33 — a subsample below 30 days is refused, not reported.**
+`evaluation.MIN_REGIME_OBSERVATIONS = 30`. A coverage estimate on twenty days is not a
+number, and printing it beside estimates on eight hundred invites exactly the
+over-reading the regime tables exist to prevent. It never fires on the VIX regimes — the
+smallest is 341 days — and exists for the tercile sensitivity and anything else that
+subsets further.
+
+**D34 — the bootstrap resamples *within* the regime, conditioning on the labels.**
+The statistic is coverage **given** stressed, so the stressed days are the sample rather
+than a draw, and the interval conditions on them. The alternative — resample the whole
+series and recompute the regime statistic in each replicate — treats regime membership as
+random too, answers a different question, and returns a wider interval for that reason
+rather than this one. One consequence belongs in the report rather than in a code
+comment: regimes are persistent, so a regime subsample is a modest number of long runs
+and its effective number of independent blocks is far below its `n`. That is *why* the
+stressed intervals are wide.
+
+**D35 — the tercile thresholds are estimated on the warm-up window alone.**
+The plan's regime sensitivity is terciles of trailing 21-day Parkinson volatility. Cut
+points taken over the full sample would be a function of the evaluation period, so every
+label would depend on days that had not happened yet — and the crisis regime would be
+defined using the crisis. The locked VIX thresholds have this property by construction at
+15 and 25; the alternative has to earn it, so `trailing_vol_thresholds` is a separate
+function that reads `:TRAIN_END` and is pinned by a corrupt-the-future test on both sides.
+The consequence is that the out-of-sample buckets are not equal thirds — the warm-up was
+calm, so 1,040 of the 2,134 evaluation days land in the top bucket. That is the honest
+cost of the discipline and is reported rather than corrected.
+
 ---
 
 ## 2. Changelog
@@ -1610,3 +1655,76 @@ Next: Stage 5, regime-conditional analysis. `summarise_by_regime` and
 regime-split, and the never-cut requirement is bootstrap CIs on every per-regime coverage
 estimate with `n` beside it -- stressed days are 341 of the 2,092 the Bayesian model
 forecasts.
+
+### Stage 5 -- regime-conditional analysis (2026-08-27)
+
+Three regime tables, two figures, and the tercile sensitivity the plan lists third on its
+cut list. The last never-cut item is discharged: every per-regime coverage estimate now
+carries a stationary-block-bootstrap interval. Decisions D32-D35 are at 1.17, all taken
+before a regime statistic existed.
+
+**The project's headline question has a surprising answer.** It asked whether interval
+calibration survives high-volatility regimes. For the GARCH models it does -- and they
+fail where nobody was looking. 99% VaR breach rates, with 95% bootstrap intervals:
+
+| model | calm (n=757) | normal (n=1,030) | stressed (n=347) |
+|---|---|---|---|
+| `garch_mle` | 1.19% [0.53, 1.85] | **2.33% [1.65, 3.11]** | 1.15% [0.29, 2.02] |
+| `garch_bayes` | 1.19% [0.53, 1.98] | **2.31% [1.51, 3.12]** | 1.47% [0.29, 2.93] |
+| `ewma` | 1.59% [0.79, 2.38] | 2.91% [2.04, 3.88] | 3.46% [1.44, 6.05] |
+| `yesterday` | 3.70% | 4.08% | 4.90% |
+
+Both GARCH models are indistinguishable from nominal in calm *and* in stress, and clearly
+too high in the middle band. The baselines degrade monotonically with volatility, which
+is the pattern one would have predicted for all four. Kupiec: p = 0.61 / 0.0003 / 0.78 for
+`garch_mle`.
+
+**The mechanism is tail misallocation, and it is invisible in a two-sided number.** At the
+99% two-sided level in the normal regime, `garch_mle` has **14 breaches below the interval
+and none above**, against 5.2 expected in each tail; `garch_bayes` has 15 and 1. Total
+coverage there is 0.9864 against a nominal 0.99 -- a near miss -- while every breach is a
+loss. That is why `interval_coverage` counts the tails separately, and it is the single
+most reportable thing in the stage.
+
+**Two-sided coverage, for the record.** Both GARCH models over-cover in calm at every
+level (0.925 / 0.967 / 0.996 against 0.90 / 0.95 / 0.99) and under-cover at 90% everywhere
+else (0.874 normal, 0.856 stressed). At 95% and 99% their intervals contain the nominal
+level in the normal and stressed regimes. The frequentist and Bayesian models are
+indistinguishable from each other in every regime at every level, which is 1.16's Result 3
+holding under conditioning.
+
+**QLIKE by regime.** The GARCH models' mean loss is *lowest* in the stressed regime (0.42
+against 0.48 normal) while EWMA's is highest there (0.63) -- so the GARCH advantage is
+widest exactly where it matters. The level is not comparable across regimes, only the
+ordering within one, and the report must say so or a rising column will read as
+deterioration.
+
+**The sensitivity does not overturn it, and sharpens it.** Under terciles of trailing
+21-day Parkinson volatility, with cut points from the warm-up window alone (D35), the
+GARCH models are closest to nominal in the *top* tercile (1.35%, Kupiec p = 0.29, n=1,040)
+and worst in the bottom one (2.06%, p = 0.012). The two definitions disagree about which
+non-stressed bucket is the weak one -- the VIX split says the middle band, the tercile
+split says the calm bucket -- and agree on the thing that matters: **these models are not
+worse in stress, they are worse outside it.** The buckets are not the same partition and
+no row compares across the two; the tercile "stressed" bucket is 1,040 days and a much
+weaker notion of stress than VIX above 25.
+
+**What this does not establish.** Why the middle is the weak spot. The plausible story --
+the 15-25 band is where regime *transitions* happen and a GARCH forecast lags a change in
+level by construction -- is a conjecture this design cannot test, and the report should
+present it as one. And the stressed intervals are wide: [0.29%, 2.02%] admits rates from a
+third of nominal to double it, so "survives stress" means "this sample cannot show it
+failing", not "is known to hold". Regimes are persistent, so those 347 days are a handful
+of long runs and the effective sample is smaller than the count suggests (D34).
+
+**Also this stage.** `data.assign_trailing_vol_regime` and `trailing_vol_thresholds`, with
+corrupt-the-future tests on both sides of the look-ahead claim and vacuity checks beside
+them. 342 tests pass and one is skipped by default, in 13m03s -- 21 new since Stage 4: 13
+for the regime tables, 6 for the trailing-volatility labels, and 2 guarding the
+`prior_delta` plumbing that the Stage 6 runs need.
+
+Next: Stage 6. The prior-sensitivity runs owed by D4 are under way as two full Bayesian
+backtests under `Beta(10, 2)` and `Beta(1, 1)`, launched from `--stage priors`, writing to
+`data/processed/prior_sensitivity/` and touching nothing else. What remains after them is
+the raw-Parkinson QLIKE ranking owed by D10, the 63-day cadence spot check, and writing up
+the GARCH-normal ablation that Stage 4 already measured.
