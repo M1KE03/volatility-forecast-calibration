@@ -10,6 +10,7 @@ shares axes, fonts and colours without each function restating them.
 
 from __future__ import annotations
 
+import textwrap
 from pathlib import Path
 
 import matplotlib
@@ -19,10 +20,26 @@ import pandas as pd
 matplotlib.use("Agg")  # no interactive backend; figures are written, not shown
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mtick
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 
 # --- House style -------------------------------------------------------------------
+#
+# The register is a sell-side research note or a journal exhibit: a left-aligned title
+# block, a rule under it, horizontal gridlines only, no box around the plot, and a source
+# line at the foot. The aim is that a figure lifted out of this repository and dropped
+# into a PDF looks like it belongs there without further work.
+#
+# Three rules the whole file follows:
+#
+# 1. **Titles state the finding, not the contents.** "EWMA lags into the spike" rather
+#    than "Forecasts and realised volatility". A reader who looks only at the exhibits
+#    should still come away with the argument.
+# 2. **Direct labelling beats a legend** wherever the series can be named at its own
+#    right-hand end, because it removes the colour-matching step entirely.
+# 3. **The source line is not decoration.** Every figure names the table it was drawn
+#    from, so a number in a slide can be traced back to a file without asking anyone.
 
 #: Stress-period shading used across figures. Chosen from the locked evaluation window's
 #: known episodes, not from anything estimated, so no figure setting depends on a result.
@@ -32,35 +49,201 @@ STRESS_PERIODS: tuple[tuple[str, str, str], ...] = (
     ("2022-01-01", "2022-10-31", "2022 bear market"),
 )
 
+#: Preferred faces, most-wanted first. Segoe UI ships with Windows and is the closest
+#: thing to a neutral research-note sans that is guaranteed present here; the rest are
+#: fallbacks so a figure rendered on another machine degrades rather than breaks.
+FONT_STACK: tuple[str, ...] = (
+    "Segoe UI",
+    "Helvetica Neue",
+    "Helvetica",
+    "Arial",
+    "DejaVu Sans",
+)
+
 COLOURS = {
-    "returns": "#31456b",
-    "accent": "#b5482e",
-    "muted": "#8a8f98",
-    "train": "#e8ecf3",
-    "grid": "#d8dce3",
+    # Text and furniture.
+    "ink": "#11161D",        # titles, axis labels, the darkest thing on the page
+    "muted": "#6B7480",      # subtitles, source lines, de-emphasised series
+    "rule": "#B9C1CC",       # the rule under the title block
+    "grid": "#E7EBF0",       # horizontal gridlines, behind everything
+    "panel": "#FFFFFF",
+    # Data.
+    "returns": "#1F3864",    # primary navy
+    "accent": "#B23A2E",     # a single warm accent, used sparingly
+    "train": "#EEF1F6",      # warm-up shading
+    "positive": "#2E6E5B",
+}
+
+#: Per-model colours. Baselines are deliberately desaturated so the two GARCH models
+#: carry the eye: in almost every figure the baselines are context and the comparison
+#: that matters is between the navy and the teal.
+MODEL_COLOURS = {
+    "yesterday": "#9AA3AF",
+    "ewma": "#B23A2E",
+    "garch_mle": "#1F3864",
+    "garch_mle_normal": "#7C93BF",
+    "garch_bayes": "#2E6E5B",
+    "garch_bayes_mean": "#84B3A2",
+}
+
+MODEL_LABELS = {
+    "yesterday": "RW-in-vol (yesterday's scaled Parkinson)",
+    "ewma": "EWMA (RiskMetrics, lambda = 0.94)",
+    "garch_mle": "GARCH(1,1)-t, plug-in",
+    "garch_mle_normal": "GARCH(1,1)-normal, plug-in (ablation)",
+    "garch_bayes": "GARCH(1,1)-t, posterior predictive",
+    "garch_bayes_mean": "GARCH(1,1)-t, plug-in at the posterior mean (ablation)",
+}
+
+#: Short forms, for axis ticks and panel titles where the full label will not fit.
+MODEL_SHORT = {
+    "yesterday": "RW-in-vol",
+    "ewma": "EWMA",
+    "garch_mle": "GARCH-t (MLE)",
+    "garch_mle_normal": "GARCH-normal",
+    "garch_bayes": "GARCH-t (Bayes)",
+    "garch_bayes_mean": "GARCH-t (post. mean)",
+}
+
+#: Regime palette, ordered calm -> stressed so the ramp reads as increasing severity.
+REGIME_COLOURS = {
+    "calm": "#8FA9CE",
+    "normal": "#1F3864",
+    "stressed": "#B23A2E",
 }
 
 
 def apply_house_style() -> None:
-    """Set rcParams once. Idempotent, so notebooks may call it freely."""
+    """Set rcParams once. Idempotent, so notebooks may call it freely.
+
+    Everything here is furniture: type, gridlines, tick geometry, the absence of a box
+    around the plot. Nothing that carries meaning is set here -- colours that encode a
+    model or a regime live in the dictionaries above, so a reader can find out what navy
+    means without reading a style function.
+    """
     plt.rcParams.update(
         {
             "figure.dpi": 110,
-            "savefig.dpi": 200,
+            "savefig.dpi": 220,
             "savefig.bbox": "tight",
+            "savefig.pad_inches": 0.28,
+            "figure.facecolor": COLOURS["panel"],
+            "axes.facecolor": COLOURS["panel"],
+            "font.family": "sans-serif",
+            "font.sans-serif": list(FONT_STACK),
             "font.size": 9,
-            "axes.titlesize": 10,
+            "text.color": COLOURS["ink"],
+            # Titles are drawn by `title_block`, not by matplotlib, so the built-in
+            # title is styled only for the panel headings of small-multiple figures.
+            "axes.titlesize": 9.5,
             "axes.titleweight": "semibold",
-            "axes.labelsize": 9,
+            "axes.titlecolor": COLOURS["ink"],
+            "axes.titlelocation": "left",
+            "axes.titlepad": 6.0,
+            "axes.labelsize": 8.5,
+            "axes.labelcolor": COLOURS["muted"],
+            "axes.edgecolor": COLOURS["rule"],
+            "axes.linewidth": 0.8,
             "axes.spines.top": False,
             "axes.spines.right": False,
+            "axes.spines.left": False,
+            "axes.axisbelow": True,
             "axes.grid": True,
+            "axes.grid.axis": "y",
             "grid.color": COLOURS["grid"],
-            "grid.linewidth": 0.6,
-            "grid.alpha": 0.7,
+            "grid.linewidth": 0.8,
+            "grid.alpha": 1.0,
+            "xtick.color": COLOURS["muted"],
+            "ytick.color": COLOURS["muted"],
+            "xtick.labelsize": 8,
+            "ytick.labelsize": 8,
+            "xtick.direction": "out",
+            "ytick.direction": "out",
+            "xtick.major.size": 3.0,
+            "ytick.major.size": 0.0,
+            "xtick.major.width": 0.8,
             "legend.frameon": False,
             "legend.fontsize": 8,
+            "legend.handlelength": 1.6,
+            "legend.borderaxespad": 0.0,
+            "lines.solid_capstyle": "round",
         }
+    )
+
+
+def title_block(
+    fig: Figure,
+    title: str,
+    subtitle: str | None = None,
+    *,
+    x: float = 0.0,
+    y: float = 1.0,
+) -> None:
+    """Left-aligned title, optional subtitle, and a rule beneath them.
+
+    Placed in figure coordinates rather than on an axis, so it sits flush left over a
+    whole grid of panels instead of being centred over one of them. The title states the
+    finding; the subtitle carries the qualification that keeps the finding honest, which
+    is usually the sample size or the thing the figure cannot show.
+    """
+    fig.text(
+        x, y, title,
+        ha="left", va="bottom",
+        fontsize=11.5, fontweight="semibold", color=COLOURS["ink"],
+    )
+    if subtitle:
+        fig.text(
+            x, y - 0.052, subtitle,
+            ha="left", va="bottom",
+            fontsize=8.6, color=COLOURS["muted"],
+        )
+
+
+def source_note(
+    fig: Figure, text: str, *, x: float = 0.0, y: float = -0.02, width: int = 118
+) -> None:
+    """A small grey source line at the foot, naming the table the figure was drawn from.
+
+    Every figure carries one. A chart in a slide deck outlives the conversation that
+    produced it, and the only defence is that it says where its numbers came from.
+
+    **Wrapped, and that is not cosmetic.** These notes are saved with
+    ``bbox_inches="tight"``, which grows the canvas to fit whatever is on it -- so a note
+    left as one long line silently stretches the figure to the width of the sentence and
+    squeezes the plot into a corner of it. Wrapping keeps the figure the size it was
+    designed at.
+    """
+    fig.text(
+        x, y, "\n".join(textwrap.wrap(text, width=width)),
+        ha="left", va="top",
+        fontsize=7.4, color=COLOURS["muted"], linespacing=1.5,
+    )
+
+
+def label_at_end(
+    ax: Axes,
+    x,
+    y: float,
+    text: str,
+    colour: str,
+    *,
+    dx: int = 6,
+    fontsize: float = 8.0,
+) -> None:
+    """Name a series at its own right-hand end, in its own colour.
+
+    Preferred over a legend wherever the lines end far enough apart to be labelled. It
+    removes the colour-matching step a legend forces on the reader, and it survives
+    being printed in greyscale.
+    """
+    ax.annotate(
+        text,
+        xy=(x, y),
+        xytext=(dx, 0),
+        textcoords="offset points",
+        ha="left", va="center",
+        fontsize=fontsize, fontweight="semibold", color=colour,
+        annotation_clip=False,
     )
 
 
@@ -80,19 +263,20 @@ def shade_stress_periods(ax: Axes, *, label: bool = True) -> None:
         ax.axvspan(
             mdates.date2num(pd.Timestamp(start)),
             mdates.date2num(pd.Timestamp(end)),
-            color=COLOURS["accent"],
+            color=COLOURS["muted"],
             alpha=0.10,
             linewidth=0,
+            zorder=0,
         )
         if label:
             ax.annotate(
                 name,
                 xy=(pd.Timestamp(start), 1.0),
                 xycoords=("data", "axes fraction"),
-                xytext=(2, -10),
+                xytext=(3, -9),
                 textcoords="offset points",
-                fontsize=7,
-                color=COLOURS["accent"],
+                fontsize=7.2,
+                color=COLOURS["muted"],
             )
 
 
@@ -272,23 +456,7 @@ def plot_vix_with_regimes(frame: pd.DataFrame, out_path: Path) -> Path:
 # --- Stage 1 figures ---------------------------------------------------------------
 
 #: Display labels for the model keys used in the forecast frame.
-MODEL_LABELS = {
-    "yesterday": "RW-in-vol (yesterday's scaled Parkinson)",
-    "ewma": "EWMA (RiskMetrics, lambda = 0.94)",
-    "garch_mle": "GARCH(1,1)-t, plug-in",
-    "garch_mle_normal": "GARCH(1,1)-normal, plug-in (ablation)",
-    "garch_bayes": "GARCH(1,1)-t, posterior predictive",
-    "garch_bayes_mean": "GARCH(1,1)-t, plug-in at the posterior mean (ablation)",
-}
 
-MODEL_COLOURS = {
-    "yesterday": "#8a8f98",
-    "ewma": "#b5482e",
-    "garch_mle": "#31456b",
-    "garch_mle_normal": "#7a90bd",
-    "garch_bayes": "#2e7d6b",
-    "garch_bayes_mean": "#7fb3a6",
-}
 
 
 def plot_forecasts_vs_realised(
@@ -746,12 +914,6 @@ def plot_interval_decomposition(
 
 # --- Stage 5 figures ---------------------------------------------------------------
 
-#: Regime palette, ordered calm -> stressed so the ramp reads as increasing severity.
-REGIME_COLOURS = {
-    "calm": "#7f9ec4",
-    "normal": "#31456b",
-    "stressed": "#b5482e",
-}
 
 
 def plot_regime_coverage(
@@ -844,11 +1006,11 @@ def plot_regime_var_rate(
     about more than either.
     """
     apply_house_style()
-    fig, ax = plt.subplots(figsize=(8.4, 4.2))
+    fig, ax = plt.subplots(figsize=(9.0, 4.6))
 
     nominal_rate = 1.0 - var_level
     regimes = [r for r in REGIME_COLOURS if r in set(regime_var["regime"])]
-    width = 0.8 / len(regimes)
+    width = 0.74 / len(regimes)
     positions = np.arange(len(models))
 
     for offset, regime in enumerate(regimes):
@@ -856,40 +1018,131 @@ def plot_regime_var_rate(
         rows = rows.reindex(list(models))
         x = positions + offset * width
         rate = rows["rate"].to_numpy()
-        ax.bar(
-            x,
-            rate,
-            width=width,
-            color=REGIME_COLOURS[regime],
-            label=regime,
-        )
+        ax.bar(x, rate, width=width * 0.92, color=REGIME_COLOURS[regime], label=regime)
         ax.errorbar(
             x,
             rate,
             yerr=[rate - rows["ci_lower"].to_numpy(), rows["ci_upper"].to_numpy() - rate],
             fmt="none",
-            ecolor="black",
+            ecolor=COLOURS["ink"],
             elinewidth=0.9,
-            capsize=2.5,
-            alpha=0.7,
+            capsize=2.0,
+            capthick=0.9,
+            alpha=0.55,
         )
 
-    ax.axhline(
-        nominal_rate,
-        color="black",
-        linewidth=1.0,
-        linestyle="--",
-        label=f"nominal {nominal_rate:.0%}",
+    ax.axhline(nominal_rate, color=COLOURS["ink"], linewidth=1.0, linestyle=(0, (4, 3)))
+    ax.annotate(
+        f"nominal {nominal_rate:.0%}",
+        xy=(1.0, nominal_rate),
+        xycoords=("axes fraction", "data"),
+        xytext=(6, 0),
+        textcoords="offset points",
+        va="center", fontsize=7.6, color=COLOURS["ink"],
+        annotation_clip=False,
     )
+
     ax.set_xticks(positions + width)
-    ax.set_xticklabels(
-        [MODEL_LABELS.get(m, m).split(" (")[0] for m in models], fontsize=8
+    ax.set_xticklabels([MODEL_SHORT.get(m, m) for m in models], fontsize=8.5)
+    ax.yaxis.set_major_formatter(mtick.PercentFormatter(xmax=1.0, decimals=0))
+    ax.set_ylim(0, None)
+    ax.tick_params(axis="x", length=0)
+    ax.legend(loc="upper left", ncol=3, fontsize=8, columnspacing=1.4)
+
+    title_block(
+        fig,
+        "The GARCH models breach most often in the middle of the volatility distribution",
+        f"{var_level:.0%} VaR breach rate by lagged-VIX regime. Bars are point estimates; "
+        "whiskers are 95% stationary-block-bootstrap intervals computed within each regime.",
     )
-    ax.set_ylabel(f"{var_level:.0%} VaR breach rate")
-    ax.set_title(
-        f"{var_level:.0%} VaR breaches by regime: the GARCH models fail in the middle, "
-        "not in the crisis"
+    source_note(
+        fig,
+        "Source: eval_regime_var.csv. Evaluation window 2017-01-03 to 2025-06-30; "
+        "n = 757 / 1,030 / 347 days (calm / normal / stressed). Overlapping whiskers are "
+        "not a test — the differences between regimes are in "
+        "eval_regime_differences.csv, where only normal against calm separates.",
     )
-    ax.legend(loc="upper right", ncol=4, fontsize=7.5)
-    fig.tight_layout()
+    fig.tight_layout(rect=(0, 0, 1, 0.90))
+    return _finish(fig, out_path)
+
+
+def plot_tail_allocation(
+    tail_asymmetry: pd.DataFrame,
+    out_path: Path,
+    *,
+    models: tuple[str, ...],
+) -> Path:
+    """Where each model's interval breaches land, against where they should.
+
+    The project's sharpest diagnostic, and the one a coverage number cannot show. Each
+    pair of bars is one nominal level: exceptions below the lower bound on the left,
+    above the upper bound on the right, with the dashed line at the count each tail
+    should hold if the predictive had the right shape.
+
+    A model that is merely too narrow overshoots both bars equally. A model whose
+    *shape* is wrong overshoots one and undershoots the other -- and for these GARCH
+    models it is always the loss tail that overshoots, at every level, because a
+    symmetric Student-t innovation cannot represent a return series whose standardised
+    residuals are skewed -0.79.
+    """
+    apply_house_style()
+    fig, axes = plt.subplots(
+        1, len(models), figsize=(2.55 * len(models), 4.3), sharey=True
+    )
+    axes = np.atleast_1d(axes)
+
+    for ax, model in zip(axes, models):
+        block = tail_asymmetry[tail_asymmetry["model"] == model].sort_values("nominal")
+        positions = np.arange(len(block))
+        colour = MODEL_COLOURS.get(model, COLOURS["returns"])
+
+        ax.bar(positions - 0.19, block["n_below"], width=0.34, color=colour)
+        ax.bar(positions + 0.19, block["n_above"], width=0.34, color=colour, alpha=0.35)
+        for x, expected in zip(positions, block["expected_per_tail"]):
+            ax.hlines(
+                expected, x - 0.42, x + 0.42,
+                color=COLOURS["ink"], linewidth=1.1, linestyle=(0, (3, 2)), zorder=3,
+            )
+
+        # The p-value belongs on the panel, not in a caption: it is the whole reason
+        # the reader should believe the eye rather than dismiss the gap as noise.
+        worst = block.loc[block["symmetry_p"].idxmin()]
+        ax.annotate(
+            f"symmetry p = {worst.symmetry_p:.0e}" if worst.symmetry_p < 0.01
+            else f"symmetry p = {worst.symmetry_p:.2f}",
+            xy=(0.5, 0.97), xycoords="axes fraction",
+            ha="center", va="top", fontsize=7.4,
+            color=COLOURS["accent"] if worst.symmetry_p < 0.01 else COLOURS["muted"],
+        )
+
+        ax.set_xticks(positions)
+        ax.set_xticklabels([f"{lv:.0%}" for lv in block["nominal"]])
+        ax.set_title(MODEL_SHORT.get(model, model))
+        ax.tick_params(axis="x", length=0)
+
+    axes[0].set_ylabel("interval exceptions")
+    axes[0].annotate(
+        "loss tail",
+        xy=(-0.19, tail_asymmetry.iloc[0]["n_below"]),
+        xytext=(0, 6), textcoords="offset points",
+        ha="center", fontsize=7.4, fontweight="semibold",
+        color=MODEL_COLOURS.get(models[0], COLOURS["returns"]),
+    )
+
+    title_block(
+        fig,
+        "The intervals are the wrong shape, not just the wrong width",
+        "Interval exceptions by tail. Solid bar is the loss tail, faded bar the upper "
+        "tail, dashed rule the count each tail should hold. A model that is merely too "
+        "narrow overshoots both equally.",
+    )
+    source_note(
+        fig,
+        "Source: eval_tail_asymmetry.csv. Evaluation window 2017-01-03 to 2025-06-30. "
+        "Symmetry p is an exact binomial test of the split against 50/50, at the level "
+        "where it is smallest. Both GARCH models reject at every level; the "
+        "standardised residuals are skewed −0.79, which a symmetric Student-t "
+        "innovation cannot represent.",
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.88))
     return _finish(fig, out_path)

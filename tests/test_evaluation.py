@@ -998,3 +998,134 @@ def test_a_replacement_proxy_that_misses_dates_is_refused(
     )
     with pytest.raises(ValueError, match="no value on"):
         E.score_forecasts(forecasts, proxy_var=short)
+
+
+# --- Tail allocation and regime differences (Stage 5, revised) --------------------
+
+
+def test_tail_asymmetry_does_not_fire_on_a_symmetric_predictive() -> None:
+    """The negative case, and it has to be a *miscalibrated* symmetric predictive.
+
+    The test must detect wrong *shape*, not wrong scale. A predictive that is uniformly
+    far too narrow breaches both bounds far too often and is still symmetric, so it must
+    come back symmetric -- otherwise the diagnostic is just re-detecting under-coverage
+    and adds nothing to the coverage table.
+    """
+    rng = np.random.default_rng(SEED)
+    n = 4000
+    returns = rng.normal(0.0, 1.0, size=n)
+    frame = pd.DataFrame(
+        {
+            "date": pd.bdate_range("2017-01-03", periods=n),
+            "model": "m",
+            "variance": 1.0,
+            "mean": 0.0,
+            "log_return": returns,
+            "proxy_var": 1.0,
+            "regime": "calm",
+            "pit": stats.norm.cdf(returns),
+            "var_99": stats.norm.ppf(0.01),
+        }
+    )
+    for level in LEVELS:  # deliberately half the width they should be
+        key = E.level_key(level)
+        half = stats.norm.ppf(0.5 + level / 2.0) * 0.5
+        frame[f"lo_{key}"], frame[f"hi_{key}"] = -half, half
+
+    table = E.tail_asymmetry_table(E.score_forecasts(frame), ("m",), sample_label="t")
+    assert (table["n_below"] + table["n_above"] > 100).all()  # badly under-covering
+    assert (table["symmetry_p"] > 0.01).all()                 # but symmetric
+
+
+def test_tail_asymmetry_fires_on_a_skewed_return_series() -> None:
+    """The positive case: a symmetric interval over left-skewed returns."""
+    rng = np.random.default_rng(SEED)
+    n = 4000
+    returns = -rng.lognormal(0.0, 0.6, size=n) + rng.lognormal(0.0, 0.2, size=n)
+    sd = returns.std()
+    frame = pd.DataFrame(
+        {
+            "date": pd.bdate_range("2017-01-03", periods=n),
+            "model": "m",
+            "variance": sd**2,
+            "mean": returns.mean(),
+            "log_return": returns,
+            "proxy_var": sd**2,
+            "regime": "calm",
+            "pit": 0.5,
+            "var_99": returns.mean() + stats.norm.ppf(0.01) * sd,
+        }
+    )
+    for level in LEVELS:
+        key = E.level_key(level)
+        half = stats.norm.ppf(0.5 + level / 2.0) * sd
+        frame[f"lo_{key}"] = returns.mean() - half
+        frame[f"hi_{key}"] = returns.mean() + half
+
+    table = E.tail_asymmetry_table(E.score_forecasts(frame), ("m",), sample_label="t")
+    assert (table["n_below"] > table["n_above"]).all()
+    assert (table["symmetry_p"] < 0.01).any()
+    assert (table["residual_skew"] < 0).all()
+
+
+def test_tail_asymmetry_reports_the_count_each_tail_should_hold(
+    scored: pd.DataFrame,
+) -> None:
+    table = E.tail_asymmetry_table(scored, ("garch_mle",), sample_label="own")
+    for row in table.itertuples():
+        assert row.expected_per_tail == pytest.approx((1.0 - row.nominal) / 2.0 * row.n)
+
+
+def test_the_real_garch_intervals_are_asymmetric_at_every_level(
+    scored: pd.DataFrame,
+) -> None:
+    """The project's sharpest empirical result, pinned so it cannot drift unnoticed.
+
+    Both GARCH models put their exceptions overwhelmingly in the loss tail at all three
+    levels, and the standardised residuals are left-skewed -- a symmetric Student-t
+    innovation cannot represent that, which is the mechanism.
+    """
+    table = E.tail_asymmetry_table(
+        scored, ("garch_mle", "garch_bayes"), sample_label="own"
+    )
+    assert (table["symmetry_p"] < 0.01).all()
+    assert (table["n_below"] > table["n_above"]).all()
+    assert (table["residual_skew"] < -0.5).all()
+
+
+def test_regime_differences_are_reported_as_differences_not_as_two_verdicts(
+    scored: pd.DataFrame,
+) -> None:
+    """The table that exists because the project made this error (#46).
+
+    ``regime_var_table`` answers "does this regime reject against nominal". Two such
+    answers do not compose into "these regimes differ", because the regimes have very
+    different sample sizes. This asserts the difference table carries the pairing and
+    its own interval.
+    """
+    table = E.regime_difference_table(scored, ("garch_mle",), sample_label="own")
+    assert list(zip(table["regime_a"], table["regime_b"])) == list(E.REGIME_PAIRS)
+    assert (table["difference"] == table["rate_a"] - table["rate_b"]).all()
+    expected = (table["ci_lower"] > 0.0) | (table["ci_upper"] < 0.0)
+    assert table["separates"].equals(expected)
+    assert (table["ci_lower"] <= table["difference"]).all()
+    assert (table["difference"] <= table["ci_upper"]).all()
+
+
+def test_the_stressed_regime_cannot_be_separated_from_the_normal_one(
+    scored: pd.DataFrame,
+) -> None:
+    """The correction itself, pinned.
+
+    The normal band's 99% breach rate is significantly worse than calm and significantly
+    worse than nominal -- but it is **not** distinguishable from the stressed regime,
+    which holds four breaches in 347 days. "Fails in the middle, not in the crisis"
+    overstates what this sample can support, and the report says the weaker thing.
+    """
+    table = E.regime_difference_table(
+        scored, ("garch_mle", "garch_bayes"), sample_label="own"
+    ).set_index(["model", "regime_a", "regime_b"])
+    for model in ("garch_mle", "garch_bayes"):
+        assert table.loc[(model, "normal", "calm"), "separates"]
+        assert not table.loc[(model, "normal", "stressed"), "separates"]
+        assert not table.loc[(model, "calm", "stressed"), "separates"]

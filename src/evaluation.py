@@ -1203,3 +1203,152 @@ def regime_var_table(
                 }
             )
     return pd.DataFrame(rows)
+
+
+# --- Tail allocation, and regime differences (Stage 5, revised) --------------------
+#
+# Both tables below exist because a statistic that is *significant against nominal* is not
+# the same as a statistic that is *significantly different from another regime*, and
+# because total coverage can be right while the breaches sit entirely in one tail. Each
+# was added after a claim made on the earlier tables turned out to be stronger than what
+# they supported. See problems-and-solutions #46.
+
+
+def tail_asymmetry_table(
+    scored: pd.DataFrame,
+    models: tuple[str, ...],
+    *,
+    sample_label: str,
+    dates: pd.DatetimeIndex | None = None,
+    levels: tuple[float, ...] = (0.90, 0.95, 0.99),
+) -> pd.DataFrame:
+    """Where a model's interval breaches land, and whether the split is symmetric.
+
+    **The single most consequential diagnostic in this project, and the one a coverage
+    number cannot give you.** A two-sided interval can hold very nearly the right *total*
+    number of exceptions while putting almost all of them below the lower bound. For a
+    volatility model that is not a rounding detail: the lower tail is the loss tail, and
+    it is the entire reason a risk desk asks for the interval.
+
+    Under a symmetric predictive the two tails should be equally populated whatever the
+    model gets wrong about scale, so the null here is ``below ~ Binomial(below + above,
+    0.5)`` and the test is exact rather than asymptotic. It is a test of the *shape* of
+    the predictive, and it is untouched by the model being uniformly too narrow or too
+    wide -- which is precisely what makes it complementary to ``coverage_table``.
+
+    Reported alongside the skew of the standardised residuals, because when this fires the
+    next question is always whether the innovation distribution can represent the
+    asymmetry at all. For a constant-mean GARCH with a symmetric Student-t, it cannot.
+    """
+    rows = []
+    for model in models:
+        block = _block(scored, model, dates)
+        finite = block["variance"].notna()
+        block = block.loc[finite]
+        returns = block["log_return"].to_numpy()
+
+        residual = (returns - block["mean"].to_numpy()) / np.sqrt(
+            block["variance"].to_numpy()
+        )
+        skew = float(stats.skew(residual))
+        skew_p = float(stats.skewtest(residual).pvalue) if residual.size > 7 else np.nan
+
+        for level in levels:
+            key = level_key(level)
+            below = int((returns < block[f"lo_{key}"].to_numpy()).sum())
+            above = int((returns > block[f"hi_{key}"].to_numpy()).sum())
+            total = below + above
+            p_value = (
+                float(stats.binomtest(below, total, 0.5).pvalue)
+                if total > 0
+                else float("nan")
+            )
+            rows.append(
+                {
+                    "sample": sample_label,
+                    "model": model,
+                    "nominal": level,
+                    "n": int(len(block)),
+                    "n_below": below,
+                    "n_above": above,
+                    "expected_per_tail": (1.0 - level) / 2.0 * len(block),
+                    "symmetry_p": p_value,
+                    "residual_skew": skew,
+                    "residual_skew_p": skew_p,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+#: Regime pairs compared in ``regime_difference_table``, in report order.
+REGIME_PAIRS: tuple[tuple[str, str], ...] = (
+    ("normal", "calm"),
+    ("normal", "stressed"),
+    ("calm", "stressed"),
+)
+
+
+def regime_difference_table(
+    scored: pd.DataFrame,
+    models: tuple[str, ...],
+    *,
+    sample_label: str,
+    dates: pd.DatetimeIndex | None = None,
+    column: str = "exceedance",
+    confidence: float = 0.95,
+) -> pd.DataFrame:
+    """Bootstrap intervals on the **difference** between two regimes' rates.
+
+    ``regime_var_table`` answers "is this regime's breach rate distinguishable from
+    nominal?". That is a different question from "is this regime's rate distinguishable
+    from *that* regime's?", and a claim of the second kind cannot be read off answers to
+    the first. Two regimes can differ in whether each rejects against nominal purely
+    because one has three times the observations, and the sentence "it fails here and not
+    there" would then be a statement about sample sizes.
+
+    This table is the statistic that claim actually needs, and it was added after the
+    project made exactly that error (problems-and-solutions #46).
+
+    The two regimes are resampled **independently**, with different seeds, because they
+    are disjoint sets of days -- there is no pairing to preserve, unlike the paired model
+    comparisons in ``bootstrap.bootstrap_loss_differential``. Each subsample keeps its own
+    block structure, so within-regime serial dependence survives the resampling.
+    """
+    from . import bootstrap as BS
+
+    rows = []
+    for model in models:
+        blocks = {
+            regime: values
+            for regime, values, _ in _regime_blocks(scored, model, dates, column)
+        }
+        for offset, (first, second) in enumerate(REGIME_PAIRS):
+            a, b = blocks[first], blocks[second]
+            indices_a = BS.stationary_bootstrap_indices(
+                a.size, seed=BS.DEFAULT_SEED + 2 * offset
+            )
+            indices_b = BS.stationary_bootstrap_indices(
+                b.size, seed=BS.DEFAULT_SEED + 2 * offset + 1
+            )
+            replicates = a[indices_a].mean(axis=1) - b[indices_b].mean(axis=1)
+            tail = 100.0 * (1.0 - confidence) / 2.0
+            lower, upper = np.percentile(replicates, [tail, 100.0 - tail])
+            rows.append(
+                {
+                    "sample": sample_label,
+                    "model": model,
+                    "column": column,
+                    "regime_a": first,
+                    "regime_b": second,
+                    "n_a": int(a.size),
+                    "n_b": int(b.size),
+                    "rate_a": float(a.mean()),
+                    "rate_b": float(b.mean()),
+                    "difference": float(a.mean() - b.mean()),
+                    "ci_lower": float(lower),
+                    "ci_upper": float(upper),
+                    "confidence": confidence,
+                    "separates": bool(lower > 0.0 or upper < 0.0),
+                }
+            )
+    return pd.DataFrame(rows)

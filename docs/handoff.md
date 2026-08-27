@@ -1,30 +1,40 @@
-# Handoff: how to continue
+# Handoff: the finished project, and how to work on it
 
-**State as of 2026-08-27. Stages 4, 5 and most of 6 complete; Stage 7 drafted.** All four forecasters exist, plus
-two ablations. The evaluation layer scores all of it — point losses, PIT, coverage, VaR
-backtests, comparisons, the interval decomposition, and the regime split with bootstrap
-intervals throughout — writing eleven tables and six figures from `forecasts.csv` alone
-and refitting nothing. All four never-cut items are discharged.
+**Complete as of 2026-08-28. Every stage of the governing plan is done, every obligation in
+the decision register is discharged, and all four never-cut items are delivered.**
 
-**One thing is outstanding and it is running.** The two prior-sensitivity backtests owed
-by D4 were launched from `--stage priors`; when they land, `--stage robustness` builds the
-summary table and three places need the result written in: `report/report.md` §7 (which
-currently says *pending*), `notebooks/03_robustness.ipynb` §3, and the Stage 6 changelog.
-Everything else in Stages 6 and 7 is done.
+Four forecasters plus two ablations, each with a forecast table over the 2,134-day
+evaluation window. The Bayesian GARCH(1,1)-t is fitted by NUTS at each of 102 refit dates,
+carrying its whole posterior into the predictive. The evaluation layer scores all of it —
+point losses, PIT, coverage, VaR backtests, pairwise comparisons, the interval
+decomposition, the regime split, the tail-allocation diagnostic and the robustness checks —
+writing sixteen tables and fourteen figures from the stored forecast table alone, refitting
+nothing. `report/report.md`
+is written. 351 tests pass, one skipped by design.
 
-**Read §4 before you quote a single number.** Three of the headline results are not what
-the governing plan anticipated, and one of them reverses the question the project is
-named after.
+**The reproduction claim is tested, not asserted.** A fresh `git clone` run through the
+pipeline reproduces every forecast table **byte for byte**, the NUTS-sampled Bayesian track
+included, in a separate process and with identical convergence diagnostics. Only wall-clock
+timings differ.
 
-This document is written for whoever picks the project up next — including a future
-session of the same work. It assumes no memory of how anything got here.
+**Read §4 before you quote a single number.** The strongest result is one the governing
+plan did not anticipate at all, three of the others contradict what it did anticipate, and
+one claim this project published had to be weakened after it was tested properly. The
+numbers are all defensible; the sentences a reader will expect to attach to them are not.
+
+This document assumes no memory of how anything got here. It is written for whoever picks
+the project up next, including a future session of this work, and for the case where that
+person's job is to *change* something rather than to continue it — which is what §3 and §8
+are for.
 
 Read in this order:
 
-1. This file — where things stand and what to do next.
-2. `docs/project1-implementation-plan.md` — the **governing plan**. It is the contract.
+1. This file — what exists, what is true, and what must not be broken.
+2. `docs/project1-implementation-plan.md` — the **governing plan**. It is the contract, and
+   it is left as written even where the results contradicted it.
 3. `research_log.md` §1 — the decision register. Locked decisions are not revisable.
-4. `docs/problems-and-solutions.md` — the traps already hit, so they are not hit twice.
+4. `docs/problems-and-solutions.md` — 45 entries on what went wrong and why, including the
+   three occasions the project's own claims turned out to be false.
 
 ---
 
@@ -43,7 +53,7 @@ python run_all.py --stage evaluate   # every table, from forecasts.csv (~30s)
 python run_all.py --stage robustness # Stage 6 checks: raw proxy, cadence, priors (~30s)
 python run_all.py --stage figures    # figures 08-13, from those tables (~10s)
 python run_all.py --stage priors     # D4's prior sensitivity, ~190 min, opt-in
-pytest -q                            # expect 342 passed, 1 skipped (~13 min)
+pytest -q                            # expect 351 passed, 1 skipped (~18 min)
 pytest -m "not slow" -q              # inner loop (~2 min)
 pytest --bayes-audit -m bayes_audit   # the audit with NUTS itself (~40 min); run at §1.15
 ```
@@ -57,7 +67,7 @@ evaluation layer still reads one table. The merge compares the two configs and r
 join runs made under different ones (D24).
 
 **`evaluate` and `figures` are cheap and re-runnable at will.** Neither refits anything.
-`evaluate` reads `forecasts.csv` and writes eleven `eval_*.csv` tables; `figures` reads
+`evaluate` reads `forecasts.csv` and writes sixteen `eval_*.csv` tables; `figures` reads
 only those tables, so a figure and the number it draws cannot disagree.
 
 **`robustness` is in `--all`; `priors` is not (D37).** `robustness` re-scores what
@@ -93,14 +103,15 @@ touching the Bayesian track. Provenance and the verified SHA-256 are in `researc
 |---|---|
 | `src/data.py` | **Complete.** Download, SHA-256 manifest, returns, Parkinson proxy, VIX regimes, `PROXY_SCALE_C`, and the trailing-volatility tercile labels used for the Stage 5 sensitivity. |
 | `src/eda.py` | **Complete.** ARCH-LM, Ljung-Box, ADF, ACF (`series_acf` and `squared_return_acf`). |
-| `src/figures.py` | **Partial.** House style + 13 figures (Stages 0-5). More added per stage. |
+| `src/figures.py` | **Complete for the report.** House style + 14 figures, all written by `run_all.py` and none by a notebook. |
 | `src/backtest.py` | **Complete.** The loop, both cadences, both tracks, the model registry, the partial/merge machinery, long-format output. |
 | `src/models.py` | **Complete.** Interface, both baselines, the shared likelihood, MLE, plug-in predictive, the frozen priors, `log_prior`/`log_posterior`, the PyMC/NUTS sampler, the mixture posterior predictive. |
 | `src/evaluation.py` | **Complete.** QLIKE/MSE, coverage, PIT + KS, Kupiec, Christoffersen independence and conditional coverage, DM with HLN, `common_sample`, the six result-table builders, and the three regime tables with bootstrap intervals. |
 | `src/bootstrap.py` | **Complete.** Politis-Romano indices, mean CI, paired loss-differential and coverage-difference CIs. |
 
-Notebooks are the presentation layer and define no analysis logic: `01_eda.ipynb` and
-`02_results.ipynb` read from `src/` and from the persisted tables. They are committed
+Notebooks are the presentation layer and define no analysis logic: `01_eda.ipynb`,
+`02_results.ipynb` and `03_robustness.ipynb` read from `src/` and from the persisted
+tables. They are committed
 **unexecuted**, with no stored outputs — `run_all.py` is what reproduces the results, and
 a notebook carrying its own outputs would be a second, unversioned source of numbers.
 
@@ -109,7 +120,10 @@ Artefacts in `data/processed/`: `analysis_frame.csv` (2,890 rows), `forecasts.cs
 partials, `backtest_config.json`, and the Stage 4 tables — `eval_point_losses.csv`,
 `eval_coverage.csv`, `eval_var_backtests.csv`, `eval_pit.csv`, `eval_comparisons.csv`,
 `eval_decomposition.csv`, `eval_regime_losses.csv`, `eval_regime_coverage.csv`,
-`eval_regime_var.csv`, and the two `_trailing` sensitivity tables.
+`eval_regime_var.csv`, the two `_trailing` sensitivity tables, and the Stage 6 pair
+`eval_raw_proxy_losses.csv` and `eval_cadence_comparison.csv`.
+
+`data/processed/cadence_63/` holds the 63-day frequentist re-run.
 
 `data/processed/prior_sensitivity/` holds the Stage 6 prior runs, one forecast table,
 refit-record table and config per candidate prior. Nothing else reads that directory.
@@ -192,9 +206,9 @@ is not what determines whether a risk model's intervals are calibrated. The gove
 plan's risk register called this outcome; it has arrived, and it is a finding rather than
 a null result.
 
-**Result 4 — and this is the one that reverses the question — calibration survives the
-crisis and fails in the middle.** 99% VaR breach rate by lagged-VIX regime, with 95%
-bootstrap intervals:
+**Result 4 — no evidence that tail calibration degrades in high volatility, and the middle
+band is the weak spot. State this carefully; the obvious phrasing overstates it.** 99% VaR
+breach rate by lagged-VIX regime, with 95% bootstrap intervals:
 
 | model | calm (n=757) | normal (n=1,030) | stressed (n=347) |
 |---|---|---|---|
@@ -204,22 +218,48 @@ bootstrap intervals:
 
 Both GARCH models are indistinguishable from nominal in calm *and* in stress and clearly
 too high in the middle band. The baselines degrade monotonically with volatility, which is
-what one would have predicted for all four. The project asks whether 99% still means 99%
-when VIX > 25; for the GARCH models the answer is yes, and the failure is in the regime
-nobody would have examined.
+what one would have predicted for all four.
 
-**The mechanism is tail misallocation, and a two-sided number cannot show it.** At the 99%
-two-sided level in the normal regime, `garch_mle` has **14 breaches below the interval and
-none above**, against 5.2 expected in each tail. Total coverage there is 0.9864 against a
-nominal 0.99 — a near miss — while every single breach is a loss. This is why
-`interval_coverage` splits the tails, and it is the most reportable thing in Stage 5.
+**But a regime that rejects against nominal where another does not is not thereby different
+from it** — the subsamples are 757, 1,030 and 347 days, so rejection against a fixed rate is
+partly a question of power. `eval_regime_differences.csv` (D38) tests the comparison the
+claim actually needs:
+
+| difference in 99% breach rate | GARCH-t (MLE) | supported? |
+|---|---|---|
+| normal − calm | +1.14pp [+0.16, +2.13] | **yes** |
+| normal − stressed | +1.18pp [−0.17, +2.34] | no |
+| calm − stressed | +0.04pp [−1.22, +1.14] | no |
+
+Under the trailing-volatility definition nothing separates at all. **The supported claim is
+the negative one**: no evidence that calibration degrades in stress, which is a failure to
+find an effect rather than a demonstration that there is none. An earlier version of this
+document, the report and the README all said "calibration survives the crisis and fails in
+the quiet". That overstated it, and problems-and-solutions #46 records how it happened.
+
+**Result 5 — the intervals are the wrong *shape*, and this is the strongest thing here.**
+The governing plan did not anticipate it, because no forecaster in the locked lineup can
+express skew: all four are symmetric about a constant mean.
+
+Under a symmetric predictive the two tails should be equally populated whatever the model
+gets wrong about scale. For both GARCH models they are not, at every level — `garch_mle`
+runs 156/81, 77/25 and 20/2 below/above at 90/95/99%, against 106.7, 53.4 and 10.7 expected
+in each tail, rejecting symmetry at p = 1.3e-6, 2.5e-7 and 1.2e-4. The standardised
+residuals have skew **−0.79 at p ≈ 1e-40**.
+
+**And the PIT mean is 0.4998**, so the misallocation cancels in aggregate and the KS test
+passes at p = 0.115. A model can satisfy the usual distributional check while its loss tail
+is systematically too thin. `eval_tail_asymmetry.csv` and figure 14 carry it; D39 records
+it. The naive baseline is *not* asymmetric — it is simply too narrow, and wrong shape versus
+wrong scale is the distinction the whole table exists to draw.
 
 **The sensitivity does not overturn Result 4 and sharpens it.** Under terciles of trailing
 21-day Parkinson volatility with cut points from the warm-up window alone (D35), the GARCH
 models are closest to nominal in the *top* tercile (1.35%, Kupiec p = 0.29) and worst in
 the bottom one (2.06%, p = 0.012). The two definitions disagree about which non-stressed
-bucket is weakest and agree on what matters: **these models are not worse in stress, they
-are worse outside it.** The two partitions are not comparable row by row — the tercile
+bucket is weakest and agree on the negative claim: **no evidence that these models degrade
+in high volatility.** Under the tercile definition no pairwise regime difference is
+significant at all, so the agreement is between two failures to find an effect. The two partitions are not comparable row by row — the tercile
 "stressed" bucket is 1,040 days and a far weaker notion of stress than VIX above 25.
 
 **Two cautions the report must carry.** The stressed intervals are wide: [0.29%, 2.02%]
@@ -247,57 +287,41 @@ lags a change in level by construction, is a conjecture this design cannot test.
 
 ---
 
-## 5. Stage 6 — robustness (1.5–2h). **Start here.**
+## 5. What is left
 
-**The expensive part is already running, or has already finished.** `--stage priors`
-launched two full Bayesian backtests under the `delta` priors D4 considered and rejected,
-`Beta(10, 2)` and `Beta(1, 1)`, at the production config and the same `mcmc_seed`, so the
-prior is the only thing that differs. They write `forecasts_delta_*.csv`,
-`refit_records_delta_*.csv` and `config_delta_*.json` into
-`data/processed/prior_sensitivity/`.
+**Nothing in the plan.** Every stage is complete, every register obligation is discharged,
+the reproduction is verified end to end, and the suite is green at 351.
 
-**When they land, the analysis is cheap and the plumbing already exists.** Score each with
-`evaluation.score_forecasts`, and run `coverage_table`, `var_backtest_table` and
-`decomposition_table` against them exactly as the headline tables are built. The question
-to answer is narrow and should be stated narrowly: **how much of the interval difference
-attributed to "the priors" at §1.13 is specific to `Beta(3, 1)`?** A smoke check on the
-warm-up window before the runs began put mean `alpha+beta` at 0.9392 under the frozen
-prior, 0.9322 under `Beta(10, 2)` and 0.9386 under `Beta(1, 1)`, with the 99th percentile
-of persistence at 0.9969, 0.9845 and 0.9998 — so the priors do separate, most visibly at
-the stationarity boundary, and the sensitivity is real rather than a formality.
+Three things are the researcher's own, and none is blocked on anything:
 
-The rest of Stage 6:
-
-- **Raw-Parkinson QLIKE ranking**, owed by D10 — show the ranking does not hinge on `c`.
-  `score_forecasts` takes the scaled proxy from the forecast table, so this needs the
-  unscaled series from the analysis frame and a second pass; it is a table, not a re-run.
-- **GARCH-normal against GARCH-t at 99%.** Already measured at Stage 4: `garch_mle_normal`
-  fails the PIT at 2.6e-4 and takes 53 breaches against 37 for the t. This is a write-up
-  task, not a computation.
-- **63-day refit cadence**, second on the cut list. A frequentist-only re-run is a minute
-  (`BacktestConfig(refit_every=63)`); the Bayesian equivalent is another 95, so decide
-  explicitly whether the check is frequentist-only and say which in the report.
-
-**One trap specific to this stage.** `prior_delta` is threaded through
-`sample_garch_posterior`, `build_bayes_paths` and `run_backtest` as an argument that
-defaults to the frozen D4 value. Two tests guard it — one that every default is
-`PRIOR_DELTA`, one that the argument actually reaches the model graph. Do not "simplify"
-it into a module constant: that would put a one-line edit between the frozen priors and
-every headline number.
+- **The report's prose and length.** `report/report.md` runs to roughly 2,750 words and six
+  tables against the plan's two-page budget — about double. The overrun is the twelve
+  disclosure obligations plus the tables; cutting to length means moving them to an
+  appendix rather than dropping them. The researcher owns the wording. Recorded here so the
+  deviation from the contract is on the record rather than discovered later.
+- **A commit.** The working tree carries the final documentation pass.
+- **Anything beyond the plan.** `docs/project1-implementation-plan.md` §5 lists what was
+  cut and in what order; the SV stretch goal went first and never returned. New ideas
+  belong in a `future-work.md` rather than in this repository's scope, which is what kept
+  the project finishable.
 
 ---
 
-## 6. Stage 7, in brief
+## 6. What the write-up is obliged to do
 
-**Write-up (3–4h).** Two pages. Never claim a model is better on a lower loss in
+*`report/report.md` is written and already does all of this. Kept here because any edit to
+it has to keep doing it.*
+
+**Two pages.** Never claim a model is better on a lower loss in
 one period; conclusions rest on bootstrap intervals, and an interval containing zero is a
 legitimate reportable finding. Keep the seven quantities distinct throughout: observed
 returns, the proxy, conditional variance forecasts, predictive intervals, VaR forecasts,
 parameter uncertainty, innovation uncertainty. The four §4 results are the spine of the
 paper, and three of them contradict what the plan expected — say so plainly. A
 pre-registered protocol that produced a surprise is the most credible thing this project
-has, and Result 4 in particular inverts the question in the title: calibration survives
-the crisis and fails in the quiet.
+has. Result 5 is the strongest and was not anticipated at all; Result 4 answers the
+question in the title in the negative — no evidence that calibration degrades under stress
+— which is a failure to find an effect and must not be written as a positive finding.
 
 The limitations section is on the never-cut list and its content already exists: one
 asset, one horizon, roughly two stress episodes; a proxy that is biased for the forecast
@@ -311,15 +335,18 @@ weak one.
 
 These were promised in the log and must be honoured, not rediscovered:
 
+*Everything marked Stage 7 is discharged in `report/report.md` as written; the row stays
+so that an edit cannot silently drop it.*
+
 | Owed | Where | Stage |
 |---|---|---|
-| QLIKE ranking on **raw** Parkinson, to show it does not hinge on `c` | D10 | 6 |
+| ~~QLIKE ranking on **raw** Parkinson, to show it does not hinge on `c`~~ **done**: the ranking is unchanged | D10 | — |
 | Report says proxy is *approximately unbiased on average* — **not** that proxy-robustness is restored | D10 | 7 |
 | Constant-mean simplification named as a limitation (raw-return Ljung-Box rejects out of sample) | §1.7 | 7 |
 | ~~`garch_mle_normal` kept out of the headline four-model tables~~ **done** at Stage 4: every builder filters on `HEADLINE_MODELS`, and a test asserts it | D15 | — |
 | Near-boundary persistence (`alpha+beta` > 0.999 in 16 of 102 MLE refits) noted rather than discovered late | §1.9 | 7 |
 | Report states the `delta` prior was chosen on a structural criterion, with full-sample posterior summaries consulted for magnitude | §1.10 | 7 |
-| Prior sensitivity across all three `delta` candidates, on evaluation-window forecasts — **runs launched**, `--stage priors`; the analysis is what remains | §1.10 | 6 |
+| ~~Prior sensitivity across all three `delta` candidates~~ **done**: parameter uncertainty identical under all three, no calibration verdict moves | §1.10 | — |
 | Report states `target_accept` was raised to 0.95 after a smoke refit diverged | §1.12 | 7 |
 | ~~`pytest --bayes-audit -m bayes_audit` run once, result recorded~~ **done**, §1.15. Owed again only if the sampler, the model graph or `build_bayes_paths` changes | §1.12 | — |
 | ~~Missing Bayesian days reported as a property of the model, every comparison stating its common sample~~ **done** at D28: enforced by refusal, and every table carries `sample` and `n` | D19 | — |
@@ -393,8 +420,16 @@ Ordered by how much damage they do while looking fine.
 
 ## 9. Budget
 
-The governing plan budgets ~15-20h total. Stages 0-5 account for roughly 16-17h of that;
-Stages 6-7 are estimated at 5-6h, of which the prior-sensitivity compute is unattended. **The plan is over its own budget**, which is what the
+The governing plan budgeted ~15-20h. The work came in at roughly 21-22h of attended time,
+over by about a quarter, plus about five hours of unattended sampling — the Bayesian
+backtest, two prior-sensitivity backtests, and the clean-clone verification.
+
+The overrun is concentrated in Stages 3-5 and it is traceable: the decomposition track
+(`garch_bayes_mean`) did not exist in the original estimate and was added because the
+comparison the project rests on turned out to have two causes; the regime analysis grew a
+sensitivity the plan had listed as cuttable; and the evaluation layer acquired a common-
+sample discipline the estimate had not anticipated. None of it was scope creep in the usual
+sense — each addition was forced by something the previous stage had found. **The plan is over its own budget**, which is what the
 cut list exists for. Cut in its stated order — the SV stretch goal is already out, then
 the refit-cadence sensitivity, then the trailing-vol regime sensitivity, then MSE as a
 secondary loss. Never the four never-cut items in §3.
@@ -405,12 +440,20 @@ remains of that obligation is analysis rather than compute.
 
 ---
 
-## 10. First three commands for the next session
+## 10. First commands for the next session
+
+Nothing here is a to-do list; it is how to confirm the repository is in the state this
+document describes before changing anything.
 
 ```bash
-pytest -q                                             # confirm 342 pass, 1 skips, before touching anything
-python -c "import pandas as pd; print(pd.read_csv('data/processed/eval_regime_var.csv').to_string())"
-sed -n '1,60p' docs/project1-implementation-plan.md   # re-read the contract
+pytest -q                                             # 351 pass, 1 skips (~18 min)
+pytest -m "not slow" -q                               # the inner loop (~1 min)
+python run_all.py --stage evaluate                    # rebuild every table from forecasts.csv
+python run_all.py --stage figures                     # rebuild all 14 figures from those tables
 ```
 
-Then start at §5 of this document.
+`evaluate` and `figures` are deterministic and take under a minute between them: if either
+produces a table or figure that differs from what is committed, something upstream has
+changed and §4's numbers are no longer the ones in the files.
+
+Then read §4 before quoting anything, and §3 and §8 before changing anything.

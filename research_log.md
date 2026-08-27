@@ -1138,6 +1138,57 @@ leaves every coverage, PIT and VaR number bit-identical. The second is the one t
 matters, because a re-scoring that quietly contaminated the calibration tables beside it
 would be worse than not running the check.
 
+
+### 1.19 Two tables added after the results were written up (2026-08-28)
+
+Both exist because a claim already in the report turned out to be stronger than the
+statistic underneath it. They are recorded here rather than folded silently into Stage 5,
+because the sequence matters: the tables were added *after* the write-up, in response to
+being asked whether any of the findings were actually significant.
+
+**D38 -- regime comparisons require a difference table, not two verdicts.**
+`regime_var_table` answers, per regime, whether the breach rate rejects against the nominal
+1%. "Fails in the middle band and not in the crisis" is a different claim: it compares
+regimes to each other, and with subsample sizes of 757, 1,030 and 347 the answer to the
+first question is partly a question of power. `regime_difference_table` bootstraps the
+pairwise differences with their own intervals, resampling the two regimes independently
+because they are disjoint sets of days and there is no pairing to preserve.
+
+Measured, at the 99% VaR: normal minus calm is +1.14pp with CI [+0.16, +2.13] and
+separates; normal minus stressed is +1.18pp with CI [-0.17, +2.34] and does not; calm minus
+stressed does not. Under the trailing-volatility definition nothing separates. **The
+supported claim is the negative one** -- no evidence that tail calibration degrades in high
+volatility -- and every document is restated to it. Problems-and-solutions #46.
+
+**D39 -- the tail split gets its own test, and it carries the strongest result here.**
+`interval_coverage` has counted `n_below` and `n_above` separately since Stage 4, but
+nothing tested the split. Under a symmetric predictive the two tails should be equally
+populated whatever the model gets wrong about scale, so the null is
+`below ~ Binomial(below + above, 0.5)` and the test is exact. `tail_asymmetry_table` runs
+it at all three levels and reports the skew of the standardised residuals beside it.
+
+Both GARCH models reject symmetry at every level -- p = 1.3e-6, 2.5e-7 and 1.2e-4 for
+`garch_mle` -- with the exceptions overwhelmingly in the loss tail. The standardised
+residuals have skew **-0.79 at p ~ 1e-40**: the GARCH filter removes the volatility
+clustering and leaves the asymmetry untouched, because a constant-mean model with symmetric
+Student-t innovations has no parameter that could represent it.
+
+**And the PIT mean is 0.4998**, so the misallocation cancels in aggregate and the KS test
+passes at p = 0.115. That combination -- a distributional test passing while the loss tail
+is systematically too thin -- is the most useful thing this project found, and it was
+invisible until the split was tested rather than merely reported. The naive baseline is
+*not* asymmetric at any level; it is simply too narrow. Wrong shape and wrong scale are
+different failures and only one of them appears in a coverage number.
+
+Figure 14 draws it. The report now leads §6.2 with it, and the regime section points at it
+rather than restating it.
+
+**What this says about the design, rather than about the models.** No forecaster in the
+locked lineup can express skew: all four are symmetric about a constant mean. The largest
+misspecification the project identifies is therefore one it could not have fixed, which is
+a limitation of the design and is recorded as such in the report. A follow-up should try
+skewed-t innovations or an asymmetric recursion before anything else.
+
 ---
 
 ## 2. Changelog
@@ -1755,3 +1806,217 @@ backtests under `Beta(10, 2)` and `Beta(1, 1)`, launched from `--stage priors`, 
 `data/processed/prior_sensitivity/` and touching nothing else. What remains after them is
 the raw-Parkinson QLIKE ranking owed by D10, the 63-day cadence spot check, and writing up
 the GARCH-normal ablation that Stage 4 already measured.
+
+### Stages 6 and 7 -- robustness and write-up (2026-08-27, in progress)
+
+**Complete except one check.** `--stage robustness` and `notebooks/03_robustness.ipynb`
+exist, `report/report.md` is written, and the reproduction claim is tested. The
+prior-sensitivity runs owed by D4 are still sampling; this entry records everything that
+does not depend on them, and a closing entry will record the result.
+
+**D10's debt is discharged, and the ranking survives.** Scored against the raw, unscaled
+Parkinson series instead of the frozen `c = 1.517318`, the QLIKE ordering is *unchanged* --
+`garch_bayes` 0.5369 < `garch_mle` 0.5444 < `ewma` 0.5813 < `yesterday` 0.5915, against
+0.4577 / 0.4599 / 0.5239 / 0.7809 on the scaled proxy. The ranking is a fact about the
+models rather than about the constant. Two details worth the report's space: the levels are
+not comparable across the two, since the raw proxy is systematically below the target the
+models forecast; and the two baselines become hard to separate from each other on the raw
+proxy, their intervals overlapping heavily where the scaled proxy separated them cleanly.
+
+Implemented as a **re-scoring, not a re-run**: `score_forecasts` takes an optional
+replacement proxy. Two tests guard it -- that the replacement actually moves the point
+losses, and that it leaves every coverage, PIT and VaR number bit-identical. The second is
+the one that matters, since a re-scoring that quietly contaminated the calibration tables
+beside it would be worse than not running the check at all.
+
+**Nothing hinges on the 21-day refit cadence.** At 63 days, `garch_mle`'s mean QLIKE moves
+from 0.4610 to 0.4616 and its 99% VaR breaches from 37 to 35; Kupiec still rejects, and the
+normal-innovation ablation still fails far worse than the t. Frequentist track only, by
+D36, and the report states the restriction.
+
+**A check fired, and the check was wrong rather than the code.** `--stage robustness`
+asserts that the two parameter-free baselines are bit-identical at both cadences, since a
+refit cadence reaching a model that estimates nothing would be a harness bug rather than a
+robustness finding. It failed on the first run. The cause was the comparison: the 21-day
+baseline came from `forecasts.csv` and the 63-day one from memory, and a CSV round trip
+moves the last bit. The repair was to compare two in-memory runs so exact equality is
+available, **not** to soften the assertion to a tolerance -- a tolerance would have been the
+loosest link in a check whose whole job is to be strict, and the baselines cost seconds.
+
+**The reproduction claim is now tested rather than asserted.** A fresh `git clone` followed
+by `--stage data` and `--stage backtest` reproduces `analysis_frame.csv` and
+`forecasts_frequentist.csv` **byte for byte**, which is what the `.gitattributes` rule
+exists for: without it Git rewrites the raw CSVs' line endings on checkout, every SHA-256
+in the manifest mismatches, and the pipeline refuses to run. The Bayesian half of the
+clean-clone run is queued behind the prior-sensitivity sampling; whether a seeded NUTS
+track reproduces bit-for-bit *across processes* or only to sampler tolerance is a real
+question and the answer belongs in the report's reproduction section either way.
+
+**The report exists.** `report/report.md` was a scaffold carrying section headings and an
+explicit prohibition on placeholder numbers; it is now written, with every quoted figure
+checked programmatically against the tables it came from. All eleven disclosure obligations
+accumulated in this log are discharged in it. It runs to about 2,750 words and six tables
+against the plan's two-page budget -- roughly double -- and the overrun is deliberate: the
+obligations are what make the report worth reading, and cutting to length would mean
+cutting them.
+
+**Two figures are embedded in it**, which the earlier draft had none of: the VaR hit
+sequence in §6.2 and the regime breach rate in §6.4, each captioned with its takeaway.
+A pass over all thirteen figures found the house style consistent and no other gaps.
+
+**One observation from the prior runs, before their analysis.** Under `delta ~ Beta(10, 2)`
+all 102 refits converged and all 2,134 evaluation days carry a forecast, against 100 of 102
+and 2,092 days under the frozen `Beta(3, 1)`. The tighter prior holds persistence further
+from the stationarity boundary, which is exactly where 1.9 recorded the data pressing and
+1.12 recorded the sampler struggling. That is a fact about sampling geometry rather than
+about calibration, and it needs stating carefully in the write-up: the frozen prior is not
+*worse* for having lost two refits, but a reader is owed the observation that the rejected
+candidate sampled more cleanly.
+
+Outstanding: the `Beta(1, 1)` run, the sensitivity table `--stage robustness` builds from
+both, and three places that then need the result written in -- `report/report.md` §7, which
+currently reads *pending*, `notebooks/03_robustness.ipynb` §3, and a closing changelog
+entry here.
+
+### Stage 6 closed -- prior sensitivity, the last of D4's debt (2026-08-27)
+
+Both rejected candidates re-run as full Bayesian backtests at the production config and
+the same `mcmc_seed`, so the prior is the only thing that differs. Compared on the 2,071
+days common to all three runs (D28), since the three lose different days to failed refits
+and a breach count on each run's own days would not be comparable across priors.
+
+| prior on `delta` | parameter uncertainty (90/95/99%) | the priors (90/95/99%) | 99% cov. | breaches |
+|---|---|---|---|---|
+| `Beta(3, 1)` frozen | 0.9975 / 0.9989 / 1.0032 | 0.9971 / 0.9927 / 0.9812 | 0.9894 | 36 |
+| `Beta(10, 2)` | 0.9975 / 0.9989 / 1.0032 | 0.9915 / 0.9858 / 0.9708 | 0.9889 | 36 |
+| `Beta(1, 1)` | 0.9975 / 0.9989 / 1.0032 | 0.9968 / 0.9924 / 0.9805 | 0.9894 | 36 |
+
+**Parameter uncertainty's contribution is identical to four decimal places under all
+three.** Not approximately: integrating over the posterior does the same thing to the
+interval regardless of which of these priors produced the posterior. That is a stronger
+statement than 1.13 was in a position to make, and it is the one the write-up should lean
+on -- the *measurement* of parameter uncertainty is not a hostage to the prior, whatever
+else is.
+
+**The priors' own contribution varies, as it must.** The informative `Beta(10, 2)` holds
+persistence further off the stationarity boundary -- mean `alpha + beta` 0.9718 against the
+frozen prior's 0.9786, maximum 0.9857 against 0.9909 -- and narrows the 99% interval by
+2.9% where the other two narrow it by 1.9%. The uniform `Beta(1, 1)` lands almost on top of
+the frozen prior, which says `Beta(3, 1)` is mild enough that the likelihood dominates it.
+
+**No calibration verdict moves.** 36 breaches of the 99% VaR under all three, coverage
+between 0.9889 and 0.9894. So the *magnitude* 1.13 attributes to the priors is specific to
+`Beta(3, 1)`; the direction, the dominance over parameter uncertainty, and every conclusion
+drawn from them are not.
+
+**One incidental, recorded rather than buried.** `Beta(10, 2)` converged at all 102 refits
+and forecast all 2,134 days; the frozen prior lost two refits and 42 days, `Beta(1, 1)` one
+refit and 21. Holding persistence off the boundary gives NUTS easier geometry, which is a
+fact about sampling and not about calibration. The frozen prior is not worse for it -- D19
+treats a failed refit as a property of the model to be reported, not a defect to be
+repaired -- but a reader is owed the observation that a candidate the project rejected
+sampled more cleanly than the one it kept.
+
+**D4's obligation is discharged.** It was the last one in this log that could not be met by
+writing a sentence, and the one gap the project could not have left silent: an unexamined
+prior behind a finding that is itself about priors. It closes in the project's favour.
+
+Sampling cost: 63.2 minutes for `Beta(10, 2)`, 74.1 for `Beta(1, 1)`.
+
+### Clean-clone reproduction, verified end to end (2026-08-27)
+
+The governing plan's Stage 7 asks that a stranger be able to reproduce every figure with
+one command. That was a claim until now.
+
+A fresh `git clone` of this repository, run through `--stage data`, `--stage backtest` and
+`--stage bayes`, reproduces `analysis_frame.csv`, `forecasts_frequentist.csv`,
+`forecasts_bayes.csv` and the merged `forecasts.csv` **byte for byte**. Maximum absolute
+difference across every numeric column of the Bayesian forecast table: exactly zero.
+
+**The Bayesian half is the part that was genuinely in question.** The look-ahead audit
+establishes that a seeded NUTS run is a function of its estimation window *within* a
+session; whether it reproduces across processes -- separate interpreter, separate PyTensor
+compilation, separate worker pool -- is a different claim, and the honest possibilities
+were "bit-identical" and "identical to sampler tolerance". It is bit-identical. The clone
+also reproduced the diagnostics exactly: 100 of 102 refits converged, worst R-hat 1.0049,
+minimum `ess_bulk` 1,475, minimum `ess_tail` 972, four divergences, and the same two refits
+failing on the same two dates, 2025-02-10 and 2025-03-12.
+
+The one artefact that differs is `seconds_elapsed` in the refit records, by up to 32
+seconds. That column is wall-clock timing and cannot reproduce; it is provenance rather
+than result, and nothing reads it.
+
+The report's reproduction section is updated from the weak claim to the strong one, which
+it is now entitled to make.
+
+### Project complete (2026-08-28)
+
+Every stage of the governing plan is delivered, every obligation in this register is
+discharged, and all four never-cut items exist: the look-ahead audit, the Christoffersen
+test, bootstrap confidence intervals on every per-regime coverage estimate, and the
+limitations section.
+
+**Final state.** Four forecasters and two ablations over 2,134 evaluation days. 345 tests
+pass and one is skipped by design — the forty-minute real-sampler audit, opt-in behind
+`--bayes-audit`, whose coverage on a default run is provided by a recording stub (D26).
+Fourteen evaluation tables, thirteen figures, three notebooks, and a written report, all
+produced by `run_all.py` and none by a notebook. The reproduction is verified byte for byte
+from a clean clone, the Bayesian track included.
+
+**The four results, and what makes them worth trusting.** Point accuracy separates GARCH
+from no-GARCH rather than one estimator from the other. The 99% VaR is breached far too
+often by every model, and the breaches are *not* clustered. Integrating over parameter
+uncertainty changes no coverage number at any level, in any regime, under any of the three
+priors tested. And calibration survives the crisis while failing in the middle of the
+volatility distribution.
+
+Three of those four contradict what the protocol expected, and that is the strongest thing
+here. The protocol was fixed before the code existed and left as written; the decisions
+that turned out to be wrong are recorded as wrong (1.13, and problems-and-solutions 38, 41
+and 42) rather than quietly amended. A pre-registered design that produced a surprise is
+worth more than one that confirmed itself.
+
+**What this register is for, in retrospect.** Thirty-seven numbered decisions, of which
+several are refusals: Giacomini-White declined as unauthorised scope (D31), Christoffersen
+declined on regime subsamples because its transitions would be fictitious (D32), any
+statistic on fewer than thirty days declined outright (D33), the Bayesian cadence check
+declined on cost and the restriction stated (D36). The refusals took longer to write than
+the implementations would have, and they are the part of this log most likely to be useful
+to someone deciding what *not* to do.
+
+**Not done, and deliberately.** The stochastic-volatility model, cut before Stage 1 and
+never revisited. Multiple assets, multiple horizons, and any conclusion about why the
+middle volatility regime is the weak one — that last is a conjecture the design cannot
+test, and the report says so.
+
+### Correction to the entry above, and the last one this log records (2026-08-28)
+
+The "Project complete" entry summarises the four results, and one of its sentences is
+wrong: *"calibration survives the crisis while failing in the middle of the volatility
+distribution."* It is left standing, because this log is append-only and an entry edited to
+match a later finding is worth nothing. This is the correction.
+
+**What the sample supports** is that the middle VIX band's 99% breach rate is worse than
+nominal and worse than the calm regime (+1.14pp, CI [+0.16, +2.13]). It does **not** support
+"survives the crisis": the middle band cannot be distinguished from the stressed regime
+(+1.18pp, CI [-0.17, +2.34]), and under the trailing-volatility definition no pairwise
+regime difference separates at all. The defensible claim is the negative one -- **no
+evidence that tail calibration degrades in high volatility** -- which is a failure to find
+an effect rather than a demonstration that there is none. D38 and 1.19 record the table
+that settles it; problems-and-solutions #46 records how the error was made and why it
+survived four documents.
+
+**And the ordering of the results changed with it.** The strongest finding in the project
+is not any of the four that entry lists. It is that the intervals are the wrong *shape*:
+both GARCH models reject symmetry of their tail exceptions at every level, p between 1e-4
+and 3e-7, driven by a standardised-residual skew of -0.79 that a symmetric Student-t
+innovation cannot represent -- while the PIT mean sits at 0.4998 and the KS test passes at
+p = 0.115. An aggregate distributional test passing while the loss tail carries ten times
+the exceptions it should is the most useful thing here, and it went unmeasured until the
+tail split was tested rather than merely reported (D39).
+
+Both corrections came from one question asked after the write-up was finished: *is any of
+this actually significant?* Nothing in the code was wrong. Two sentences were, and they had
+propagated into the report, the README, the handoff and this log. The project's own subject
+is over-confident uncertainty, and it produced two over-confident claims of its own -- which
+is the most honest thing it can say about how easily that happens.

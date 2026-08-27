@@ -155,9 +155,34 @@ test has little power there.
 breaches are spread across the sample rather than concentrated in the shaded stress
 episodes. Too many exceptions, arriving at the wrong rate rather than at the wrong time.*
 
-The tails are also misallocated. At the 99% two-sided level GARCH-t (MLE) breaches its
-lower bound 20 times and its upper bound twice, against roughly 10.7 expected in each tail.
-The interval is close to the right total width and almost every exception is a loss.
+**The tails are misallocated, and this is the strongest result in the report.** Under a
+symmetric predictive the two tails should be equally populated whatever the model gets
+wrong about scale. They are not:
+
+| level | GARCH-t below / above | expected each tail | symmetry test |
+|---|---|---|---|
+| 90% | 156 / 81 | 106.7 | p = 1.3 × 10⁻⁶ |
+| 95% | 77 / 25 | 53.4 | p = 2.5 × 10⁻⁷ |
+| 99% | 20 / 2 | 10.7 | p = 1.2 × 10⁻⁴ |
+
+The Bayesian model is the same to within a breach or two. The mechanism is not in doubt:
+the standardised residuals have skew **−0.79 (p ≈ 10⁻⁴⁰)**. The GARCH filter removes the
+volatility clustering and leaves the asymmetry untouched, because a constant-mean model
+with symmetric Student-t innovations has no parameter that could represent it.
+
+**And the standard calibration test cannot see this.** The PIT mean is 0.4998 — the
+misallocation cancels almost exactly in aggregate, which is why the KS test passes at
+p = 0.115. A model can satisfy the usual distributional check while its loss tail, the
+entire reason a risk desk asks for the interval, is systematically too thin. Note also that
+RW-in-vol, the naive baseline, is *not* asymmetric at any level: it is simply too narrow.
+Being wrong about shape and being wrong about scale are different failures, and only one of
+them is visible in a coverage number.
+
+![Where the interval breaches land](../figures/14_tail_allocation.png)
+
+*Dashed line is the count each tail should hold. A model that is merely too narrow
+overshoots both bars equally, as RW-in-vol does. A model whose shape is wrong overshoots
+one and undershoots the other — and for both GARCH models it is always the loss tail.*
 
 ### 6.3 Parameter uncertainty changes nothing a risk manager would notice
 
@@ -183,7 +208,7 @@ breach counts. Nothing in 2,092 days of returns lands in a 0.32% gap. At estimat
 of 750 observations and above, integrating over parameter uncertainty is not what
 determines whether a risk model's intervals are calibrated.
 
-### 6.4 Regimes: calibration survives the crisis and fails in the quiet
+### 6.4 Regimes: no evidence of degradation in stress, and a weak spot in the middle
 
 99% VaR breach rate by lagged-VIX regime, with 95% block-bootstrap intervals:
 
@@ -195,8 +220,31 @@ determines whether a risk model's intervals are calibrated.
 | RW-in-vol | 3.70% | 4.08% | 4.90% |
 
 The baselines degrade monotonically with volatility — the pattern one would have predicted
-for all four. The GARCH models do not. They are indistinguishable from nominal in calm and
+for all four. The GARCH models do not: they are indistinguishable from nominal in calm and
 in stress, and clearly too high in the middle band.
+
+**That comparison needs care, and stating it as "fails in the crisis or not" would
+overstate it.** A regime that rejects against nominal where another does not is not thereby
+*different* from it — the regimes have very different sample sizes, and rejection against a
+fixed rate is partly a question of power. The statistic the claim needs is the difference
+between two regimes, with its own interval:
+
+| difference in 99% breach rate | GARCH-t (MLE) | supported? |
+|---|---|---|
+| normal − calm | +1.14pp [+0.16, +2.13] | **yes** |
+| normal − stressed | +1.18pp [−0.17, +2.34] | no |
+| calm − stressed | +0.04pp [−1.22, +1.14] | no |
+
+So what the sample supports is: **the middle band is significantly worse than calm, and
+worse than nominal. Whether it is worse than the stressed regime is unresolved** — 347
+stressed days holding four breaches cannot settle it. Under the trailing-volatility regime
+definition (§7) *no* pairwise regime difference is significant at all, though the point
+estimates run the same way.
+
+The defensible summary is therefore the negative one: **there is no evidence that these
+models' tail calibration degrades in high volatility**, which is a failure to find an
+effect rather than a demonstration that none exists. That is a weaker claim than the
+regime-by-regime table invites, and it is the one the evidence carries.
 
 ![99% VaR breach rate by regime](../figures/13_regime_var_rate.png)
 
@@ -206,10 +254,11 @@ distinguish from nominal. Both GARCH models straddle it in calm and in stress an
 it in the middle. The stressed intervals are wide because 347 days of stress are a
 handful of long runs, not 347 independent observations.*
 
-The mechanism is the tail misallocation of §6.2, concentrated: at 99% two-sided in the
-normal regime, GARCH-t (MLE) puts **14 breaches below the interval and none above** against
-5.2 expected in each tail. Total coverage there reads as a near miss while every exception
-is a loss.
+The tail misallocation of §6.2 is concentrated here: at 99% two-sided in the normal
+regime, GARCH-t (MLE) puts **14 breaches below the interval and none above**, against 5.2
+expected in each tail. Total coverage there reads as a near miss while every exception is a
+loss. That asymmetry is significant on the full sample independently of any regime split,
+which is why §6.2 rather than this section carries the finding.
 
 Two things this does not establish. The stressed intervals are wide — [0.29%, 2.02%] admits
 rates from a third of nominal to double it — so "survives stress" means *this sample cannot
@@ -233,9 +282,11 @@ answer the same question.
 **Regime definition.** Repeating §6.4 on terciles of trailing 21-day Parkinson volatility —
 cut points estimated on the warm-up window alone, so the labels carry no look-ahead either —
 the GARCH models are closest to nominal in the *top* tercile (1.35%, Kupiec p = 0.29) and
-worst in the *bottom* (2.06%, p = 0.012). The two definitions are different partitions and no
-row compares across them; they disagree about which non-stressed bucket is weakest and
-agree that **these models are not worse in stress, they are worse outside it**.
+worst in the *bottom* (2.06%, p = 0.012). The two definitions are different partitions and
+no row compares across them. They disagree about which non-stressed bucket is weakest, and
+agree in **finding no evidence that these models degrade in high volatility** — under this
+definition no pairwise regime difference is significant at all, so the agreement is between
+two negative results rather than between two positive ones.
 
 **Innovation distribution.** The normal-innovation ablation fails PIT uniformity at
 p = 2.6 × 10⁻⁴ where the Student-t passes at 0.115, and takes 53 breaches of its 99% VaR
@@ -244,15 +295,46 @@ the sharpest contrast in the report: **choosing the innovation distribution move
 coverage decisively, while integrating over parameter uncertainty does not move it at
 all.**
 
-**Prior sensitivity.** *(pending — see `notebooks/03_robustness.ipynb` §3)*
+**Prior sensitivity.** The whole backtest re-run under each `delta` prior the design
+considered and rejected, at the production config and the same seed, compared on the 2,071
+days common to all three runs:
+
+| prior on `delta` | parameter uncertainty (90/95/99%) | the priors (90/95/99%) | 99% breaches |
+|---|---|---|---|
+| `Beta(3, 1)` (frozen) | 0.9975 / 0.9989 / 1.0032 | 0.9971 / 0.9927 / 0.9812 | 36 |
+| `Beta(10, 2)` | 0.9975 / 0.9989 / 1.0032 | 0.9915 / 0.9858 / 0.9708 | 36 |
+| `Beta(1, 1)` | 0.9975 / 0.9989 / 1.0032 | 0.9968 / 0.9924 / 0.9805 | 36 |
+
+**Parameter uncertainty's contribution is identical to four decimal places under all
+three.** The priors' own contribution is not, and should not be: the informative
+`Beta(10, 2)` holds persistence further off the stationarity boundary (mean `alpha + beta`
+0.9718 against the frozen prior's 0.9786) and narrows the 99% interval by 2.9% where the
+other two narrow it by 1.9%. Every calibration verdict is unchanged — 36 breaches under all
+three, 99% coverage between 0.9889 and 0.9894.
+
+So the *magnitude* attributed to "the priors" in §6.3 is specific to `Beta(3, 1)`, while
+the direction, the dominance over parameter uncertainty, and every conclusion drawn from
+them are not. Incidentally, `Beta(10, 2)` converged at all 102 refits where the frozen
+prior lost two — holding persistence off the boundary gives the sampler easier geometry.
+That is a fact about sampling, not about calibration, and the frozen prior is not worse for
+it.
 
 ## 8. Discussion
 
-Three findings, two of which contradict what the protocol anticipated: the models separate
-by *model class* rather than by *estimator*; the 99% VaR is breached far too often by all
-four yet the breaches are not clustered, the opposite of the failure mode this design was
-built to catch; and calibration does not degrade under stress for the GARCH models but in
-the middle of the volatility distribution.
+The most robust finding is one the protocol did not anticipate at all, because the model
+lineup contains no way to express it: **the intervals are the wrong shape, not merely the
+wrong width.** Every exception count at every level is skewed to the loss tail, at p-values
+between 10⁻⁴ and 10⁻⁷, and the standardised residuals carry a skew of −0.79 that a
+symmetric innovation distribution cannot absorb. That has a concrete remedy the design did
+not include — skewed-t innovations, or an asymmetric volatility recursion — and it is the
+first thing a follow-up should try.
+
+Three further findings, two of which contradict what the protocol anticipated: the models
+separate by *model class* rather than by *estimator*; the 99% VaR is breached far too often
+by all four yet the breaches are not clustered, the opposite of the failure mode this design
+was built to catch; and tail calibration shows no evidence of degrading under stress,
+failing instead in the middle of the volatility distribution — though only the comparison
+against the calm regime is statistically supported.
 
 For the question in the title, the answer is negative in a specific and useful way.
 Integrating over parameter uncertainty is the more principled thing to do and it is
@@ -283,9 +365,16 @@ all four forecasters and so cannot bias the comparison between them.
 the 102 maximum-likelihood refits and peaks at 0.99998 — every fit admissible and converged,
 but close to the edge, and the Bayesian model enforces the same constraint by construction.
 
-**Underpowered tests.** Christoffersen on 37 events, per-regime Kupiec on four and five
-breaches in the stressed regime, and every crisis-subsample interval. Several conclusions
-here are "this sample cannot show a difference", which is not the same as "there is none".
+**Underpowered tests, and the stressed regime especially.** Christoffersen on 37 events;
+per-regime Kupiec on four and five breaches in the stressed regime; every crisis-subsample
+interval. Several conclusions here are "this sample cannot show a difference", which is not
+the same as "there is none" — most importantly the claim that calibration survives stress,
+which rests on a subsample that cannot distinguish a 1% breach rate from a 2% one.
+
+**No skew term in any model.** The single largest misspecification this report identifies
+is one the model lineup could not have fixed, because every forecaster in it is symmetric
+about a constant mean. That is a limitation of the design rather than a finding about the
+models.
 
 **Multiplicity.** Eight pairwise comparisons across three levels and three regimes, with
 unadjusted p-values.
@@ -306,7 +395,9 @@ pytest -q                              # the full suite, including the look-ahea
 
 Raw data is a committed snapshot verified against a SHA-256 manifest; the pipeline refuses
 to run on altered bytes. The reproduction claim is tested rather than asserted: a fresh
-clone reproduces the analysis frame and the frequentist forecast table byte for byte. Every seed is fixed — the sampler's in `BacktestConfig`, the
+clone reproduces every forecast table **byte for byte**, the NUTS-sampled Bayesian track
+included, in a separate process and with identical convergence diagnostics. Only wall-clock
+timings differ. Every seed is fixed — the sampler's in `BacktestConfig`, the
 bootstrap's separately in `src/bootstrap.py`, so evaluation intervals are reproducible
 independently of the sampler. Decisions, including the ones that turned out to be wrong and
 the ones that were refused, are recorded in `research_log.md`; the traps encountered are in

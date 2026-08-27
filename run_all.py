@@ -511,6 +511,16 @@ def stage_evaluate(args: argparse.Namespace) -> None:
         "eval_regime_var": E.regime_var_table(
             scored, scored_models, sample_label="own days"
         ),
+        # Where the breaches land, and whether the split is symmetric. A coverage number
+        # cannot show this, and for these models it is the sharpest thing in the stage.
+        "eval_tail_asymmetry": E.tail_asymmetry_table(
+            scored, scored_models, sample_label="own days"
+        ),
+        # Differences *between* regimes. "Rejects here and not there" is a claim about
+        # two regimes and needs this table, not two rows of the one above (#46).
+        "eval_regime_differences": E.regime_difference_table(
+            scored, scored_models, sample_label="own days"
+        ),
     }
 
     # The regime sensitivity the plan asks for: terciles of trailing 21-day Parkinson
@@ -604,6 +614,34 @@ def stage_evaluate(args: argparse.Namespace) -> None:
             )
         print(f"  {model:<18} " + "  ".join(cells))
     print("  (* = the interval excludes the nominal 1% rate)")
+
+    asymmetry = tables["eval_tail_asymmetry"]
+    print()
+    print("Where the interval breaches land. Under a symmetric predictive the two tails")
+    print("should be equally populated whatever the model gets wrong about scale.")
+    for model in headline:
+        block = asymmetry[asymmetry["model"] == model]
+        skew = block["residual_skew"].iloc[0]
+        cells = "  ".join(
+            f"{row.nominal:.0%}: {row.n_below}/{row.n_above}"
+            f"{'*' if row.symmetry_p < 0.01 else ' '}"
+            for row in block.itertuples()
+        )
+        print(f"  {model:<18} below/above  {cells}   residual skew {skew:+.3f}")
+    print("  (* = the split rejects symmetry at 1%)")
+
+    differences = tables["eval_regime_differences"]
+    print()
+    print("Differences BETWEEN regimes in the 99% breach rate. A regime that rejects")
+    print("against nominal where another does not is not thereby different from it.")
+    for model in headline:
+        for row in differences[differences["model"] == model].itertuples():
+            verdict = "separates" if row.separates else "cannot separate"
+            print(
+                f"  {model:<18} {row.regime_a:>8} - {row.regime_b:<8} "
+                f"{row.difference:+.4f}  [{row.ci_lower:+.4f}, {row.ci_upper:+.4f}]  "
+                f"{verdict}"
+            )
 
     regime_coverage = tables["eval_regime_coverage"]
     at_99 = regime_coverage[regime_coverage["nominal"] == 0.99]
@@ -802,53 +840,63 @@ def stage_robustness(args: argparse.Namespace) -> None:
         print("   D4's obligation is outstanding until it is, and if it is cut it must")
         print("   be cut explicitly into the limitations section rather than by omission.")
     else:
-        rows = []
+        # Every prior run is compared on the intersection of all of them with the
+        # headline sample. The three runs lose different days to failed refits -- 42
+        # under the frozen prior, none under Beta(10,2), 21 under Beta(1,1) -- so a
+        # breach count on each run's own days would not be comparable across priors,
+        # which is the only comparison this table exists to support (D28).
+        runs = {"delta_3_1 (frozen, D4)": scored}
         for path in prior_files:
-            label = path.stem.replace("forecasts_", "")
-            alt = pd.read_csv(path, parse_dates=["date"])
-            alt_scored = E.score_forecasts(alt.reset_index(drop=True))
-            for model in B.BAYES_MODELS:
-                coverage = E.coverage_table(
-                    alt_scored, (model,), sample_label=label, levels=(0.99,)
-                )
-                var_table = E.var_backtest_table(
-                    alt_scored, (model,), sample_label=label
-                )
-                rows.append(
-                    {
-                        "prior": label,
-                        "model": model,
-                        "n": coverage["n"].item(),
-                        "coverage_99": coverage["empirical"].item(),
-                        "mean_width_99": coverage["mean_width"].item(),
-                        "breaches": var_table["breaches"].item(),
-                        "kupiec_p": var_table["kupiec_p"].item(),
-                    }
-                )
-        frozen_rows = []
-        for model in B.BAYES_MODELS:
-            coverage = E.coverage_table(
-                scored, (model,), sample_label="frozen", levels=(0.99,)
+            runs[path.stem.replace("forecasts_", "")] = E.score_forecasts(
+                pd.read_csv(path, parse_dates=["date"])
             )
-            var_table = E.var_backtest_table(scored, (model,), sample_label="frozen")
-            frozen_rows.append(
-                {
-                    "prior": "delta_3_1 (frozen, D4)",
-                    "model": model,
-                    "n": coverage["n"].item(),
-                    "coverage_99": coverage["empirical"].item(),
-                    "mean_width_99": coverage["mean_width"].item(),
-                    "breaches": var_table["breaches"].item(),
-                    "kupiec_p": var_table["kupiec_p"].item(),
-                }
+        prior_common = common
+        for run in runs.values():
+            prior_common = prior_common.intersection(
+                E.common_sample(run, B.BAYES_MODELS)
             )
-        tables["eval_prior_sensitivity"] = pd.DataFrame(frozen_rows + rows)
+
+        def series(run: pd.DataFrame, model: str, column: str):
+            block = run[
+                (run["model"] == model) & run["date"].isin(prior_common)
+            ].sort_values("date")
+            return block[column].to_numpy()
+
+        rows = []
+        for label, run in runs.items():
+            row = {"prior": label, "n": len(prior_common)}
+            for level in (0.90, 0.95, 0.99):
+                key = E.level_key(level)
+                row[f"param_uncertainty_{key}"] = float(
+                    (
+                        series(run, B.BAYES_MODEL, f"width_{key}")
+                        / series(run, B.BAYES_MEAN_MODEL, f"width_{key}")
+                    ).mean()
+                )
+                # Always against the *same* frequentist plug-in: the question is what
+                # each prior does to the point estimate, and garch_mle is the fixed
+                # reference all three are measured from.
+                row[f"priors_{key}"] = float(
+                    (
+                        series(run, B.BAYES_MEAN_MODEL, f"width_{key}")
+                        / series(scored, "garch_mle", f"width_{key}")
+                    ).mean()
+                )
+            row["coverage_99"] = float(series(run, B.BAYES_MODEL, "inside_99").mean())
+            row["breaches_99"] = int(series(run, B.BAYES_MODEL, "exceedance").sum())
+            rows.append(row)
+        tables["eval_prior_sensitivity"] = pd.DataFrame(rows)
+
+        print(f"   compared on {len(prior_common):,} days common to all three runs (D28)")
+        print("   parameter uncertainty is garch_bayes / garch_bayes_mean within each run;")
+        print("   the priors are that run's garch_bayes_mean / the one garch_mle plug-in.")
         for row in tables["eval_prior_sensitivity"].itertuples():
             print(
-                f"   {row.prior:<24} {row.model:<18} n={row.n:,}  "
-                f"99% coverage {row.coverage_99:.4f}  "
-                f"mean width {row.mean_width_99:.5f}  "
-                f"breaches {row.breaches}"
+                f"   {row.prior:<22} param-unc "
+                f"{row.param_uncertainty_90:.4f}/{row.param_uncertainty_95:.4f}/"
+                f"{row.param_uncertainty_99:.4f}   priors "
+                f"{row.priors_90:.4f}/{row.priors_95:.4f}/{row.priors_99:.4f}   "
+                f"99% coverage {row.coverage_99:.4f}, {row.breaches_99} breaches"
             )
 
     print()
@@ -904,6 +952,11 @@ def stage_figures(args: argparse.Namespace) -> None:
         figures.plot_regime_var_rate(
             pd.read_csv(PROCESSED_DIR / "eval_regime_var.csv"),
             FIGURES_DIR / "13_regime_var_rate.png",
+            models=headline,
+        ),
+        figures.plot_tail_allocation(
+            pd.read_csv(PROCESSED_DIR / "eval_tail_asymmetry.csv"),
+            FIGURES_DIR / "14_tail_allocation.png",
             models=headline,
         ),
     ]

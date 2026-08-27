@@ -7,10 +7,10 @@ Companion to `research_log.md` and `README.md`.
 - This file is the **problem-oriented** view: every difficulty encountered so far, why it
   mattered, and the fix that is now in the repository.
 
-Scope: everything up to the end of **Stage 5** (regime analysis complete, 2026-08-27).
+Scope: the whole project, through Stage 7 (2026-08-28).
 The entries are grouped by the stage that produced them. The summary table below covers
-entries 1-36, through Stage 2; entries 37 onward — the Bayesian model and the evaluation
-layer — are listed in full further down without a summary row.
+entries 1-36, through Stage 2; entries 37 onward — the Bayesian model, the evaluation layer
+and the robustness checks — are listed in full further down without a summary row.
 
 A note on what is included. Several entries are mistakes made during this work rather
 than external obstacles — a plan followed too long, a premise never tested, a test that
@@ -929,33 +929,168 @@ the primary, or the robustness check is the least trustworthy number in the repo
 
 ---
 
+### 44. An invariance check fired, and the check was wrong
+
+**Problem.** `--stage robustness` asserts that the two parameter-free baselines produce
+bit-identical forecasts at a 21-day and a 63-day refit cadence. Neither estimates a
+parameter, so the cadence is a genuine no-op for them, and anything else would mean the
+refit schedule was reaching a model it has no business touching. It failed on the first
+run, reporting that the cadence had changed `yesterday`.
+
+**Why it mattered.** The obvious repair is to soften the assertion to `np.allclose`, and it
+would have worked. That is exactly the move problems #3, #7 and #38 warn about, and the
+tempting version of it: the failing check is *mine*, the tolerance is *tiny*, and the
+softened version still looks strict. Establishing whether the test or the code was wrong
+took one diagnostic and settled it: the difference was 1e-16, one unit in the last place,
+and it appeared because the 21-day baseline was read back from `forecasts.csv` while the
+63-day one was still in memory. A CSV round trip does not preserve the last bit of a float.
+
+**Solution.** Compare two *in-memory* runs, so exact equality is available and no tolerance
+is needed. The baselines cost seconds to recompute, so the exactness is free. A comment at
+the site says why the stored table is not used, since it is the more obvious thing to
+reach for.
+
+**Generalisation.** When a strict check fails by an amount too small to matter, the
+question is not "what tolerance makes this pass" but "why is there any difference at all".
+Here the answer named a property of the *comparison* rather than of the code, and it had a
+repair that kept the check strict. A tolerance would have been the loosest link in an
+assertion whose entire job is to be strict.
+
+---
+
+### 45. A test passed while asserting nothing, because of a default tolerance
+
+**Problem.** `test_an_alternative_proxy_moves_the_point_losses` exists to stop the
+raw-proxy check from being vacuous: if the replacement proxy were silently ignored, the raw
+ranking would equal the scaled one by construction rather than by finding, and the whole
+D10 check would prove nothing. It asserted `not np.isclose(scaled_mse, raw_mse)` — and
+failed, because `np.isclose` said they *were* close.
+
+**Why it mattered.** Variance-scale MSE here is of order 1e-8, and `np.isclose` carries a
+default absolute tolerance of `atol=1e-8`. Any two numbers that small are "close" to it
+regardless of their values. Had the QLIKE assertion been written the same way and the MSE
+one omitted, the test would have passed while asserting nothing about half of what it
+claimed to cover — a green test guarding a vacuous check guarding a robustness result.
+
+The failure also exposed a second wrong assumption of mine: mean MSE genuinely moves by
+less than a tenth of a percent under this rescaling, because it is dominated by a handful
+of extreme days where the forecast is far from the proxy either way. A threshold picked to
+look demanding would have failed for a reason that was not the one being tested.
+
+**Solution.** QLIKE compared as a relative gap; MSE compared with `np.allclose(...,
+rtol=1e-6, atol=0.0)`, the absolute tolerance pinned to zero. Both traps are named in a
+comment at the site.
+
+**Generalisation.** Default tolerances are calibrated for quantities of order one. Any test
+on a quantity many orders of magnitude away from that — variances, probabilities, currency
+in minor units — has to state its own, and a *negative* assertion built on a default
+tolerance is the dangerous case, because the tolerance being too loose makes it pass.
+
+---
+
+### 46. The claim was stronger than the test that supported it
+
+**Problem.** Stage 5 reported that the GARCH models' 99% VaR is well calibrated in calm and
+in stress and fails in the middle VIX band, and the headline went out as *calibration
+survives the crisis and fails in the quiet*. Every number behind it was correct. The claim
+was not.
+
+**Why it mattered.** `regime_var_table` answers one question per row: does *this* regime's
+breach rate reject against the nominal 1%? Calm and stressed do not reject; normal does.
+Reading "fails here and not there" off three such rows is a different claim -- it compares
+regimes to each other -- and nothing in the table tests it. The regimes have very different
+sample sizes (757, 1,030, 347), so whether a given deviation rejects against nominal is
+partly a question of power, and the stressed regime holds four breaches in 347 days.
+
+Bootstrapping the difference directly settles it. The normal band is significantly worse
+than calm (+1.14pp, CI [+0.16, +2.13]). It is **not** distinguishable from the stressed
+regime (+1.18pp, CI [-0.17, +2.34]). Under the trailing-volatility regime definition no
+pairwise difference is significant at all. What the sample supports is the negative
+statement -- *no evidence that calibration degrades in high volatility* -- which is a
+failure to find an effect rather than a demonstration that there is none.
+
+The error survived into the report, the README, the handoff and the log before anyone asked
+for the difference test, and it survived precisely because the underlying tables were right.
+
+**Solution.** `evaluation.regime_difference_table` computes the pairwise differences with
+their own bootstrap intervals, `--stage robustness`... rather, `--stage evaluate` writes
+`eval_regime_differences.csv`, and `run_all.py` prints the differences beneath the
+per-regime rates with the reminder that one does not compose into the other. Two tests pin
+it, one of them asserting the specific correction: normal separates from calm and does
+*not* separate from stressed. Every document is restated to the weaker claim.
+
+**Generalisation.** This is the same species as #38, #41 and #42, and the fourth time this
+project has been caught by it: the code was right and the *sentence about* the code was
+wrong. The tell is a claim whose grammar does not match the statistic underneath it. "A
+rejects and B does not" is a statement about two tests; "A is worse than B" is a statement
+about one difference. If no table contains the second, it has not been measured -- and a
+project whose subject is over-confident uncertainty has no excuse for the substitution.
+
+---
+
 ## Still open
 
-Carried forward deliberately, not overlooked:
+*Nothing here is unresolved work. Every item below is either discharged, or a limitation of
+the design that the report states rather than a problem the code can fix.*
 
-- **Residual conditional bias in the scaled proxy** (#9). Wording obligation on the
-  report; robustness check owed at Stage 6.
-- **Constant mean over the evaluation period** (#10). Limitations section.
-- ~~**Priors for the Bayesian GARCH.**~~ **Frozen at Stage 3** in `research_log.md`
-  1.10, before any Bayesian out-of-sample number existed. `delta ~ Beta(3, 1)` departs
-  from the 1.6 probe's `Beta(10, 2)`, which placed zero density at the stationarity
-  boundary the data presses against. What remains owed is the report sentence disclosing
-  that full-sample posterior summaries were consulted for magnitude, and the prior
-  sensitivity check in `03_robustness`.
-- ~~**`BayesianFit` still carries emcee fields.**~~ **Re-keyed at Stage 3** to
-  `r_hat`, `ess_bulk`, `ess_tail`, `n_divergences`, plus `converged`/`message`/`n_obs`
-  mirroring `FrequentistFit` so D19 can apply D16's rule to both tracks. Nothing outside
-  `models.py` referenced the old fields.
+- **Residual conditional bias in the scaled proxy** (#9). `c` buys approximate
+  *unconditional* unbiasedness, not conditional, so QLIKE's proxy-robustness assumption is
+  violated and comparisons are within-proxy only. **Stated in the report** (§3, §9), and
+  the robustness check owed by D10 is **done**: the model ranking is unchanged on the raw,
+  unscaled Parkinson series, so it is a fact about the models rather than about the
+  constant. A property of the measurement, not a defect.
+- **Constant mean over the evaluation period** (#10). Raw-return Ljung-Box rejects out of
+  sample at p = 7.1e-14, so this is a real simplification. Applied identically to all four
+  forecasters, so it cannot bias the comparison between them. **Stated in the report** §9.
+- ~~**Priors for the Bayesian GARCH.**~~ **Frozen at Stage 3** in `research_log.md` 1.10,
+  before any Bayesian out-of-sample number existed, and **sensitivity-checked at Stage 6**:
+  the whole backtest re-run under `Beta(10, 2)` and `Beta(1, 1)`. Parameter uncertainty's
+  contribution is identical to four decimal places under all three, no calibration verdict
+  moves, and the report discloses that full-sample posterior summaries were consulted for
+  magnitude after the structural criterion chose the prior. Fully closed.
+- ~~**`BayesianFit` still carries emcee fields.**~~ **Re-keyed at Stage 3** to `r_hat`,
+  `ess_bulk`, `ess_tail`, `n_divergences`, plus `converged`/`message`/`n_obs` mirroring
+  `FrequentistFit` so D19 can apply D16's rule to both tracks.
 - **Persistence near the stationarity boundary.** `alpha + beta` reaches 0.99998 and
-  exceeds 0.999 in 16 of the 102 refits (log §1.9). Admissible throughout, but the
-  Bayesian model enforces the same constraint by construction, so the posterior will
-  press against the same edge. Worth a sentence in the report rather than a discovery
-  at Stage 7.
+  exceeds 0.999 in 16 of the 102 maximum-likelihood refits. Every fit admissible and
+  converged. **Stated in the report** §9, and the prior sensitivity gave it an unexpected
+  epilogue: the informative `Beta(10, 2)` prior, which holds persistence further off that
+  boundary, converged at all 102 refits where the frozen prior lost two. Easier sampling
+  geometry, not better calibration — but recorded rather than buried.
 - ~~**Fitted tails slightly fatter than the residuals warrant.**~~ **Answered at Stage 4,
   and the answer is the opposite of the worry.** The warm-up QQ plot put the empirical
-  standardised residuals inside the fitted t at both ends, which suggested over-coverage
-  at 99%. Out of sample there is *under*-coverage: `garch_mle` covers 0.9897 against a
-  nominal 0.99 two-sided, and on the one-sided 99% VaR both GARCH models take 37 breaches
-  against 21 expected, rejecting Kupiec at p = 0.002. What the warm-up window suggested
-  about the tails did not survive the evaluation window, which is its own small lesson
-  about diagnosing a model on the sample it was fitted to.
+  standardised residuals inside the fitted t at both ends, which suggested over-coverage at
+  99%. Out of sample there is *under*-coverage: `garch_mle` covers 0.9897 against a nominal
+  0.99, and on the one-sided 99% VaR both GARCH models take 37 breaches against 21
+  expected, rejecting Kupiec at p = 0.002. What the warm-up window suggested about the
+  tails did not survive the evaluation window — its own small lesson about diagnosing a
+  model on the sample it was fitted to.
+
+---
+
+## What the 46 entries add up to
+
+Read in bulk, they fall into three groups, and the proportions are the point.
+
+**A minority are external obstacles** — a compiler that needed installing, a dependency
+that downgraded three pins, CRLF endings breaking a hash on checkout. Ordinary friction.
+
+**Most are errors of mine, caught before they reached a result.** A test asserting the
+wrong quantity, an audit that would have passed vacuously, a plan followed past the point
+it stopped being right, a check softened when the check was the thing that was wrong, a
+tolerance that made a negative assertion meaningless. None of these were found by being
+careful in the abstract; each was found because something specific was asserted and then
+tested against a case where it had to fail.
+
+**Four are claims the project itself had been repeating that turned out to be false**
+(#38, #41, #42, #46). Those are the expensive ones. In each case the code was correct and the
+*sentence about* the code was wrong — a sanity check inherited from a handoff document, a
+one-cause comparison that had acquired a second cause, an expectation from the governing
+plan that the data contradicted, a claim whose grammar did not match the statistic beneath
+it. A project whose subject is whether stated uncertainty can be trusted has no business
+holding its own claims to a lower standard than it holds its models', and the reason this
+file exists is that the standard has to be applied to prose as well as to code.
+
+The last of them was found by being asked, at the very end, whether any of this was
+actually significant. That question should be asked of every result before it is written
+up, not after.
