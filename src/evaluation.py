@@ -629,6 +629,7 @@ def score_forecasts(
     *,
     levels: tuple[float, ...] = (0.90, 0.95, 0.99),
     var_level: float = 0.99,
+    proxy_var: pd.Series | None = None,
 ) -> pd.DataFrame:
     """Attach per-observation losses, interval indicators and exceedances.
 
@@ -636,6 +637,13 @@ def score_forecasts(
     leaving a row NaN wherever the model produced no forecast. Elementwise columns may
     carry NaN; the *statistics* built from them may not, which is why every table
     builder below states the sample it used.
+
+    ``proxy_var`` replaces the point-loss target, indexed by date, and exists for one
+    reason: D10 owes a QLIKE ranking on the **raw**, unscaled Parkinson series, to show
+    the ranking does not hinge on the frozen constant ``c``. It changes the two point
+    losses and nothing else -- coverage, PIT and the VaR backtests are scored against
+    observed returns and never touch the proxy, which a test asserts. Anything passed
+    here must be on a stated scale and the table it feeds must say which.
     """
     required = {"model", "date", "variance", "proxy_var", "log_return", "var_99"}
     missing = sorted(required - set(forecasts.columns))
@@ -643,6 +651,15 @@ def score_forecasts(
         raise KeyError(f"forecast table is missing columns: {missing}")
 
     scored = forecasts.copy()
+    if proxy_var is not None:
+        replacement = scored["date"].map(proxy_var)
+        if replacement.isna().any() and scored["proxy_var"].notna().all():
+            n_bad = int(replacement.isna().sum())
+            raise ValueError(
+                f"the replacement proxy has no value on {n_bad} of the forecast "
+                "dates; it must cover the evaluation window exactly"
+            )
+        scored["proxy_var"] = replacement.to_numpy()
     finite = scored["variance"].notna().to_numpy()
 
     for name, loss_fn in LOSS_FUNCTIONS.items():

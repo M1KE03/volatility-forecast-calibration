@@ -34,7 +34,7 @@ PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 FIGURES_DIR = PROJECT_ROOT / "figures"
 
 STAGE_ORDER: tuple[str, ...] = (
-    "data", "eda", "backtest", "bayes", "evaluate", "figures", "priors",
+    "data", "eda", "backtest", "bayes", "evaluate", "robustness", "figures", "priors",
 )
 
 #: What ``--all`` runs, and it is not every stage. ``priors`` is the Stage 6
@@ -64,6 +64,10 @@ STAGE_HELP: dict[str, str] = {
              "maximum. About 95 minutes; results merge into the same forecast table.",
     "evaluate": "Compute QLIKE and variance MSE, interval coverage, VaR backtests, "
                 "Diebold-Mariano comparisons, and block-bootstrap intervals.",
+    "robustness": "Stage 6 checks: the QLIKE ranking on the raw unscaled proxy (D10), "
+                  "a 63-day refit cadence on the frequentist track, and the prior "
+                  "sensitivity summary if `--stage priors` has been run. About 30 "
+                  "seconds; re-runs nothing expensive.",
     "figures": "Render the figures used in report/report.md.",
     "priors": "Prior sensitivity (D4's debt): re-run the Bayesian backtest under each "
               "of the two rejected `delta` priors, writing to "
@@ -639,6 +643,221 @@ def stage_evaluate(args: argparse.Namespace) -> None:
         print(f"wrote {path}  ({len(table)} rows)")
 
 
+#: Refit cadence for the Stage 6 sensitivity check, against the locked 21 days.
+CADENCE_SENSITIVITY = 63
+
+
+def stage_robustness(args: argparse.Namespace) -> None:
+    """Stage 6: the checks that ask whether the conclusions hinge on a choice.
+
+    Three of them, in ascending order of what they would cost to be wrong about.
+
+    **The raw-proxy QLIKE ranking**, owed by D10. Every headline point loss is scored
+    against the Parkinson series multiplied by the frozen constant ``c = 1.517318``. If
+    the ranking of models moved when ``c`` was removed, the ranking would be a fact
+    about the constant rather than about the models. It is a re-scoring, not a re-run.
+
+    **The 63-day refit cadence**, second on the governing plan's cut list. Frequentist
+    track only, and that is a stated choice rather than an oversight: the question is
+    whether conclusions depend on how often parameters are re-estimated, and the
+    frequentist track answers it in twenty seconds where the Bayesian track would cost
+    another ninety-five minutes. The report says so.
+
+    **Prior sensitivity**, owed by D4, if ``--stage priors`` has been run. That stage is
+    opt-in and takes about 190 minutes; this one reports what it produced and says
+    plainly when it has produced nothing yet, rather than silently omitting the check.
+
+    Like ``priors``, the cadence re-run writes to its own directory and never calls
+    ``save_track``, so it cannot reach ``forecasts.csv``.
+    """
+    from dataclasses import asdict
+
+    import pandas as pd
+
+    from src import backtest as B
+    from src import data as D
+    from src import evaluation as E
+
+    forecast_path = PROCESSED_DIR / "forecasts.csv"
+    frame_path = PROCESSED_DIR / "analysis_frame.csv"
+    for path in (forecast_path, frame_path):
+        if not path.exists():
+            raise SystemExit(f"{path} not found. Run the earlier stages first.")
+
+    forecasts = pd.read_csv(forecast_path, parse_dates=["date"])
+    frame = pd.read_csv(frame_path, index_col=0, parse_dates=True)
+    scored = E.score_forecasts(forecasts)
+    headline = B.HEADLINE_MODELS
+    common = E.common_sample(scored, headline)
+    tables: dict[str, pd.DataFrame] = {}
+
+    # --- 1. Does the QLIKE ranking survive removing c? (D10) ----------------------
+    raw = E.score_forecasts(forecasts, proxy_var=frame["parkinson_var"])
+    scaled_losses = E.point_loss_table(
+        scored, headline, sample_label="scaled proxy (headline)", dates=common
+    )
+    raw_losses = E.point_loss_table(
+        raw, headline, sample_label="raw Parkinson", dates=common
+    )
+    tables["eval_raw_proxy_losses"] = pd.concat(
+        [scaled_losses, raw_losses], ignore_index=True
+    )
+
+    print(f"1. QLIKE ranking, scaled against raw proxy (n = {len(common):,})")
+    orderings = {}
+    for label, table in (("scaled", scaled_losses), ("raw", raw_losses)):
+        qlike = table[table["loss"] == "qlike"].sort_values("mean")
+        orderings[label] = list(qlike["model"])
+        cells = "  ".join(
+            f"{row.model} {row.mean:.4f}" for row in qlike.itertuples()
+        )
+        print(f"   {label:<7} {cells}")
+    verdict = (
+        "unchanged" if orderings["scaled"] == orderings["raw"] else "CHANGED"
+    )
+    print(f"   verdict: the ranking is {verdict} when c is removed (D10).")
+
+    # --- 2. Does anything hinge on the 21-day refit cadence? ----------------------
+    print()
+    print(f"2. Refit cadence {B.REFIT_EVERY} -> {CADENCE_SENSITIVITY} days, "
+          "frequentist track only (a stated choice; see the docstring)", flush=True)
+    cadence_dir = PROCESSED_DIR / f"cadence_{CADENCE_SENSITIVITY}"
+    cadence_dir.mkdir(parents=True, exist_ok=True)
+    cadence_config = B.BacktestConfig(refit_every=CADENCE_SENSITIVITY)
+    cadence_forecasts, cadence_records = B.run_backtest(
+        frame, cadence_config, models=B.FREQUENTIST_MODELS
+    )
+    cadence_forecasts.to_csv(
+        cadence_dir / "forecasts.csv",
+        index_label="date",
+        date_format="%Y-%m-%d",
+        lineterminator="\n",
+    )
+    pd.DataFrame([asdict(r) for r in cadence_records]).to_csv(
+        cadence_dir / "refit_records.csv",
+        index=False,
+        date_format="%Y-%m-%d",
+        lineterminator="\n",
+    )
+
+    cadence_scored = E.score_forecasts(cadence_forecasts.reset_index())
+    rows = []
+    for model in B.FREQUENTIST_MODELS:
+        base = E.var_backtest_table(scored, (model,), sample_label="21 days")
+        alt = E.var_backtest_table(cadence_scored, (model,), sample_label="63 days")
+        base_q = E.point_loss_table(scored, (model,), sample_label="21 days")
+        alt_q = E.point_loss_table(cadence_scored, (model,), sample_label="63 days")
+        rows.append(
+            {
+                "model": model,
+                "qlike_21": base_q.loc[base_q["loss"] == "qlike", "mean"].item(),
+                "qlike_63": alt_q.loc[alt_q["loss"] == "qlike", "mean"].item(),
+                "breaches_21": base["breaches"].item(),
+                "breaches_63": alt["breaches"].item(),
+                "kupiec_p_21": base["kupiec_p"].item(),
+                "kupiec_p_63": alt["kupiec_p"].item(),
+            }
+        )
+    tables["eval_cadence_comparison"] = pd.DataFrame(rows)
+
+    # The baselines estimate nothing, so the refit cadence is a genuine no-op for them.
+    # Anything else would mean the cadence is reaching a model it has no business
+    # touching, which is a harness bug rather than a robustness finding.
+    #
+    # Compared against a *fresh in-memory* 21-day run rather than against
+    # ``forecasts.csv``, so the assertion can be exact equality. The stored table has
+    # been through a CSV round trip and differs from the in-memory value in the last
+    # bit, which is not a difference worth a tolerance -- and a tolerance here would be
+    # the loosest link in a check whose whole job is to be strict. The baselines cost
+    # seconds, so buying the exactness is free.
+    baseline_21, _ = B.run_backtest(frame, B.BacktestConfig(), models=B.BASELINE_MODELS)
+    for model in B.BASELINE_MODELS:
+        a = baseline_21.loc[baseline_21["model"] == model, "variance"].to_numpy()
+        b = cadence_forecasts.loc[
+            cadence_forecasts["model"] == model, "variance"
+        ].to_numpy()
+        if not (a == b).all():
+            raise SystemExit(
+                f"cadence changed {model!r}, which estimates no parameters -- this is a "
+                "harness bug, not a robustness result"
+            )
+    print(f"   baselines identical at both cadences, as they must be "
+          f"({', '.join(B.BASELINE_MODELS)})")
+    for row in tables["eval_cadence_comparison"].itertuples():
+        if row.model in B.BASELINE_MODELS:
+            continue
+        print(
+            f"   {row.model:<18} QLIKE {row.qlike_21:.4f} -> {row.qlike_63:.4f}   "
+            f"99% VaR breaches {row.breaches_21} -> {row.breaches_63}   "
+            f"Kupiec p {row.kupiec_p_21:.4f} -> {row.kupiec_p_63:.4f}"
+        )
+
+    # --- 3. Prior sensitivity, if the runs have happened (D4) ---------------------
+    print()
+    print("3. Prior sensitivity on delta (D4)")
+    prior_dir = PROCESSED_DIR / "prior_sensitivity"
+    prior_files = sorted(prior_dir.glob("forecasts_delta_*.csv")) if prior_dir.exists() else []
+    if not prior_files:
+        print("   not yet run. `python run_all.py --stage priors` (~190 min).")
+        print("   D4's obligation is outstanding until it is, and if it is cut it must")
+        print("   be cut explicitly into the limitations section rather than by omission.")
+    else:
+        rows = []
+        for path in prior_files:
+            label = path.stem.replace("forecasts_", "")
+            alt = pd.read_csv(path, parse_dates=["date"])
+            alt_scored = E.score_forecasts(alt.reset_index(drop=True))
+            for model in B.BAYES_MODELS:
+                coverage = E.coverage_table(
+                    alt_scored, (model,), sample_label=label, levels=(0.99,)
+                )
+                var_table = E.var_backtest_table(
+                    alt_scored, (model,), sample_label=label
+                )
+                rows.append(
+                    {
+                        "prior": label,
+                        "model": model,
+                        "n": coverage["n"].item(),
+                        "coverage_99": coverage["empirical"].item(),
+                        "mean_width_99": coverage["mean_width"].item(),
+                        "breaches": var_table["breaches"].item(),
+                        "kupiec_p": var_table["kupiec_p"].item(),
+                    }
+                )
+        frozen_rows = []
+        for model in B.BAYES_MODELS:
+            coverage = E.coverage_table(
+                scored, (model,), sample_label="frozen", levels=(0.99,)
+            )
+            var_table = E.var_backtest_table(scored, (model,), sample_label="frozen")
+            frozen_rows.append(
+                {
+                    "prior": "delta_3_1 (frozen, D4)",
+                    "model": model,
+                    "n": coverage["n"].item(),
+                    "coverage_99": coverage["empirical"].item(),
+                    "mean_width_99": coverage["mean_width"].item(),
+                    "breaches": var_table["breaches"].item(),
+                    "kupiec_p": var_table["kupiec_p"].item(),
+                }
+            )
+        tables["eval_prior_sensitivity"] = pd.DataFrame(frozen_rows + rows)
+        for row in tables["eval_prior_sensitivity"].itertuples():
+            print(
+                f"   {row.prior:<24} {row.model:<18} n={row.n:,}  "
+                f"99% coverage {row.coverage_99:.4f}  "
+                f"mean width {row.mean_width_99:.5f}  "
+                f"breaches {row.breaches}"
+            )
+
+    print()
+    for name, table in tables.items():
+        path = PROCESSED_DIR / f"{name}.csv"
+        table.to_csv(path, index=False)
+        print(f"wrote {path}  ({len(table)} rows)")
+
+
 def stage_figures(args: argparse.Namespace) -> None:
     """Render figures from the persisted evaluation tables.
 
@@ -800,6 +1019,7 @@ STAGES = {
     "backtest": stage_backtest,
     "bayes": stage_bayes,
     "evaluate": stage_evaluate,
+    "robustness": stage_robustness,
     "figures": stage_figures,
     "priors": stage_priors,
 }

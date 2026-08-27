@@ -24,6 +24,33 @@ distribution** against a **Bayesian posterior-predictive distribution** built fr
 integrated over. The question is whether doing so improves predictive-interval
 calibration.
 
+## Findings
+
+![99% VaR breaches by regime](figures/13_regime_var_rate.png)
+
+**1. Calibration survives the crisis and fails in the quiet.** Both GARCH(1,1)-t models
+breach their 99% VaR at a rate indistinguishable from nominal when VIX is below 15 (1.19%)
+*and* when it is above 25 (1.15%, 1.47%) — and clearly too often in the middle band (2.3%).
+The baselines degrade monotonically with volatility, which is what one would have predicted
+for all four. The mechanism is tail misallocation: in the normal regime the plug-in GARCH
+puts 14 breaches below its 99% interval and none above, against 5.2 expected in each tail.
+
+**2. Integrating over parameter uncertainty changes no coverage number.** The posterior
+predictive is 0.32% wider than the plug-in at its own posterior mean at the 99% level —
+exactly what theory predicts — and the two have *identical* coverage at every level, in
+every regime, and identical breach counts. Nothing in 2,092 days of returns lands in that
+gap. Choosing the innovation distribution, by contrast, moves 99% coverage from 0.9775 to
+0.9897. **The error bars are set by the distributional assumption, not by the treatment of
+parameters.**
+
+**3. The models separate by model class, not by estimator.** Both GARCH models beat both
+baselines on QLIKE with bootstrap intervals nowhere near zero. The frequentist and Bayesian
+pair differ by half a percent of the loss level, and the plug-in at the posterior mean
+cannot be separated from the MLE plug-in at all.
+
+Two of those three contradict what the pre-registered protocol expected. The full argument,
+with every caveat that qualifies it, is in [`report/report.md`](report/report.md).
+
 ## Models compared
 
 | # | Model | Key | Role | State |
@@ -464,10 +491,13 @@ and never reaches the analysis frame (decision D8 in `research_log.md`).
 │   ├── figures.py         # house style, all figures
 │   ├── evaluation.py      # losses, PIT, coverage, VaR tests, DM, result tables
 │   └── bootstrap.py       # stationary block bootstrap
-├── notebooks/             # thin presentation layer only
+├── notebooks/             # thin presentation layer only, committed unexecuted
+│   ├── 01_eda.ipynb
+│   ├── 02_results.ipynb   # every headline table and figure
+│   └── 03_robustness.ipynb
 ├── tests/
-├── figures/
-└── report/report.md
+├── figures/               # 13 figures, all written by run_all.py
+└── report/report.md       # the two-page mini-paper
 ```
 
 ## Reproducibility

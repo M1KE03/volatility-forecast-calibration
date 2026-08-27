@@ -1111,6 +1111,33 @@ The consequence is that the out-of-sample buckets are not equal thirds — the w
 calm, so 1,040 of the 2,134 evaluation days land in the top bucket. That is the honest
 cost of the discipline and is reported rather than corrected.
 
+### 1.18 Decided at Stage 6 (2026-08-27)
+
+**D36 — the refit-cadence sensitivity is frequentist-only, and says so.**
+The governing plan asks for a 63-day cadence spot check and puts it second on the cut
+list. Running it on the frequentist track costs twenty seconds; running it on the Bayesian
+track costs another ninety-five minutes and answers the same question -- whether
+conclusions depend on how often parameters are re-estimated -- with the same structure and
+one more decimal place. The frequentist version is run, the Bayesian version is not, and
+the report states the restriction rather than leaving a reader to assume the check covered
+both. This is a scope decision taken before the check ran, not a result-dependent one.
+
+**D37 — `robustness` belongs in the default pipeline; `priors` does not.**
+`--stage robustness` re-scores what already exists and re-runs only the cheap track, so it
+sits in `--all`. `--stage priors` is two more full Bayesian backtests for a check that
+produces no headline number, so it does not: including it would turn the one-command
+reproduction a stranger runs first into a five-hour job. Both write to their own
+directories and neither can reach `forecasts.csv`, which the merge machinery guarantees by
+iterating over a fixed `TRACKS` mapping rather than over whatever is on disk.
+
+**D10's debt is discharged by re-scoring, not by a re-run.** The raw-Parkinson QLIKE
+ranking needed no new forecasts -- only the same forecasts scored against a different
+point-loss target -- so `score_forecasts` takes an optional replacement proxy. Two tests
+guard the arrangement: that the replacement actually moves the point losses, and that it
+leaves every coverage, PIT and VaR number bit-identical. The second is the one that
+matters, because a re-scoring that quietly contaminated the calibration tables beside it
+would be worse than not running the check.
+
 ---
 
 ## 2. Changelog

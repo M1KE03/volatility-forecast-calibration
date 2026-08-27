@@ -919,3 +919,82 @@ def test_regime_statistics_ignore_the_volatility_proxy(forecasts: pd.DataFrame) 
             builder(base, B.HEADLINE_MODELS, sample_label="own"),
             builder(other, B.HEADLINE_MODELS, sample_label="own"),
         )
+
+
+# --- The raw-proxy re-scoring (Stage 6, D10) --------------------------------------
+
+
+def test_an_alternative_proxy_moves_the_point_losses(forecasts: pd.DataFrame) -> None:
+    """D10 owes a QLIKE ranking on the raw, unscaled Parkinson series.
+
+    The mechanism is a replacement point-loss target, and it has to actually replace
+    something -- an argument silently ignored would make the whole check vacuous, with
+    the raw ranking identical to the scaled one by construction rather than by finding.
+    """
+    scaled = E.score_forecasts(forecasts)
+    raw_proxy = (
+        forecasts[forecasts["model"] == "garch_mle"]
+        .set_index("date")["proxy_var"]
+        / 1.517318
+    )
+    raw = E.score_forecasts(forecasts, proxy_var=raw_proxy)
+
+    # Two tolerance traps avoided here, both of which would have left the assertion
+    # looking strict and asserting nothing. ``np.isclose``'s default absolute tolerance
+    # of 1e-8 calls any two variance-scale MSE values equal, since they are of order
+    # 1e-8 to begin with. And mean MSE genuinely moves by less than a tenth of a percent
+    # under this rescaling -- it is dominated by a handful of extreme days where the
+    # forecast is far from the proxy either way -- so a threshold chosen to look
+    # demanding would fail for a reason that is not the one being tested.
+    qlike_gap = abs(scaled["qlike"].mean() - raw["qlike"].mean()) / scaled["qlike"].mean()
+    assert qlike_gap > 0.01
+
+    finite = scaled["mse"].notna()
+    assert not np.allclose(
+        scaled.loc[finite, "mse"].to_numpy(),
+        raw.loc[finite, "mse"].to_numpy(),
+        rtol=1e-6,
+        atol=0.0,
+    )
+
+
+def test_an_alternative_proxy_leaves_every_calibration_number_untouched(
+    forecasts: pd.DataFrame,
+) -> None:
+    """The claim the new argument's docstring makes, asserted rather than promised.
+
+    Coverage, PIT and the VaR backtests are scored against observed returns. Changing
+    the point-loss target must not move any of them by so much as a bit, or the raw-proxy
+    check would silently contaminate the calibration results it sits beside.
+    """
+    scaled = E.score_forecasts(forecasts)
+    raw = E.score_forecasts(
+        forecasts,
+        proxy_var=forecasts[forecasts["model"] == "garch_mle"]
+        .set_index("date")["proxy_var"]
+        / 1.517318,
+    )
+    models = B.HEADLINE_MODELS
+    for builder in (E.coverage_table, E.var_backtest_table, E.pit_table):
+        pd.testing.assert_frame_equal(
+            builder(scaled, models, sample_label="test"),
+            builder(raw, models, sample_label="test"),
+        )
+    pd.testing.assert_frame_equal(
+        E.regime_var_table(scaled, models, sample_label="t"),
+        E.regime_var_table(raw, models, sample_label="t"),
+    )
+
+
+def test_a_replacement_proxy_that_misses_dates_is_refused(
+    forecasts: pd.DataFrame,
+) -> None:
+    """Silently NaN-ing the days it does not cover would shrink the sample without
+    saying so, which is D28's rule applied to the other input."""
+    short = (
+        forecasts[forecasts["model"] == "garch_mle"]
+        .set_index("date")["proxy_var"]
+        .iloc[:100]
+    )
+    with pytest.raises(ValueError, match="no value on"):
+        E.score_forecasts(forecasts, proxy_var=short)

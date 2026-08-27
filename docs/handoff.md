@@ -1,14 +1,16 @@
 # Handoff: how to continue
 
-**State as of 2026-08-27. Stages 4 and 5 complete.** All four forecasters exist, plus
+**State as of 2026-08-27. Stages 4, 5 and most of 6 complete; Stage 7 drafted.** All four forecasters exist, plus
 two ablations. The evaluation layer scores all of it — point losses, PIT, coverage, VaR
 backtests, comparisons, the interval decomposition, and the regime split with bootstrap
 intervals throughout — writing eleven tables and six figures from `forecasts.csv` alone
 and refitting nothing. All four never-cut items are discharged.
 
-**Stage 6 is next, and part of it is already running.** The two prior-sensitivity
-backtests owed by D4 were launched from `--stage priors` and take about 190 minutes; see
-§5 for what to do when they land.
+**One thing is outstanding and it is running.** The two prior-sensitivity backtests owed
+by D4 were launched from `--stage priors`; when they land, `--stage robustness` builds the
+summary table and three places need the result written in: `report/report.md` §7 (which
+currently says *pending*), `notebooks/03_robustness.ipynb` §3, and the Stage 6 changelog.
+Everything else in Stages 6 and 7 is done.
 
 **Read §4 before you quote a single number.** Three of the headline results are not what
 the governing plan anticipated, and one of them reverses the question the project is
@@ -38,6 +40,7 @@ python run_all.py --stage eda        # diagnostics + 4 figures
 python run_all.py --stage backtest   # baselines + GARCH + 3 figures (~1 min)
 python run_all.py --stage bayes      # the Bayesian track (~95 min)
 python run_all.py --stage evaluate   # every table, from forecasts.csv (~30s)
+python run_all.py --stage robustness # Stage 6 checks: raw proxy, cadence, priors (~30s)
 python run_all.py --stage figures    # figures 08-13, from those tables (~10s)
 python run_all.py --stage priors     # D4's prior sensitivity, ~190 min, opt-in
 pytest -q                            # expect 342 passed, 1 skipped (~13 min)
@@ -56,6 +59,12 @@ join runs made under different ones (D24).
 **`evaluate` and `figures` are cheap and re-runnable at will.** Neither refits anything.
 `evaluate` reads `forecasts.csv` and writes eleven `eval_*.csv` tables; `figures` reads
 only those tables, so a figure and the number it draws cannot disagree.
+
+**`robustness` is in `--all`; `priors` is not (D37).** `robustness` re-scores what
+exists and re-runs only the cheap track, so it costs thirty seconds. It also asserts on
+every run that the two parameter-free baselines are bit-identical at both cadences, and
+stops if they are not: a refit cadence reaching a model that estimates nothing would be a
+harness bug, not a robustness finding.
 
 **`priors` is opt-in and is not part of `--all`.** It is two more full Bayesian backtests
 under the `delta` priors D4 rejected — about 190 minutes, no headline number — so
