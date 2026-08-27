@@ -6,9 +6,9 @@ Usage
     python run_all.py --stage data
     python run_all.py --all
 
-``data``, ``eda``, ``backtest`` and ``bayes`` are implemented (Stages 0-3).
-``evaluate`` and ``figures`` are still stubs and raise ``NotImplementedError``: their
-interfaces exist so they can be reviewed before any implementation is written.
+Every stage is implemented (Stages 0-4). ``evaluate`` and ``figures`` read the stored
+forecast table and never refit anything, so no number they print can move without
+``forecasts.csv`` having moved first.
 
 Stages run in the order listed and each depends on its predecessor's artefacts in
 ``data/processed/``.
@@ -378,13 +378,209 @@ def stage_bayes(args: argparse.Namespace) -> None:
 
 
 def stage_evaluate(args: argparse.Namespace) -> None:
-    """Score the forecasts and persist the evaluation tables."""
-    raise NotImplementedError("stage 'evaluate' not implemented")
+    """Score the forecasts and persist the evaluation tables.
+
+    Reads ``forecasts.csv`` and nothing else: no model is refitted here, and no number
+    in this stage can move without the forecast table having moved first.
+
+    Two samples, both reported (D28). Per-model marginals use each model's own
+    available days; every cross-model comparison uses the intersection, which for a
+    pair involving the Bayesian model is 2,092 of the 2,134 evaluation days -- two
+    refits failed their convergence diagnostics and produced no forecasts for the 21
+    days each served (D19). Both are correct, they are different numbers, and every
+    table carries the label and the ``n`` saying which it holds.
+
+    The ablations stay out of the headline tables and are scored separately:
+    ``garch_mle_normal`` under D15, ``garch_bayes_mean`` under D29. The second is not
+    a fifth competitor but the control that splits the frequentist-Bayesian interval
+    difference into the part the priors cause and the part parameter uncertainty
+    causes -- see ``evaluation.decomposition_table``.
+    """
+    import itertools
+
+    import pandas as pd
+
+    from src import backtest as B
+    from src import bootstrap as BS
+    from src import evaluation as E
+
+    forecast_path = PROCESSED_DIR / "forecasts.csv"
+    if not forecast_path.exists():
+        raise SystemExit(
+            f"{forecast_path} not found. Run `python run_all.py --stage backtest` "
+            "and `--stage bayes` first."
+        )
+    forecasts = pd.read_csv(forecast_path, parse_dates=["date"])
+    scored = E.score_forecasts(forecasts)
+
+    headline = B.HEADLINE_MODELS
+    scored_models = tuple(dict.fromkeys((*headline, *B.BAYES_MODELS, *B.GARCH_MODELS)))
+    common = E.common_sample(scored, headline)
+
+    print(f"models    : {', '.join(scored_models)}")
+    print(f"headline  : {', '.join(headline)}  (ablations scored, reported separately)")
+    print(
+        f"samples   : own days per model; common sample across the headline four is "
+        f"{len(common):,} of {scored['date'].nunique():,} evaluation days"
+    )
+    print(
+        f"bootstrap : stationary block, mean length {BS.MEAN_BLOCK_LENGTH}, "
+        f"{BS.N_REPLICATIONS:,} replications, seed {BS.DEFAULT_SEED}"
+    )
+    print()
+
+    # Pairwise comparisons: every headline pair, plus the two contrasts that split the
+    # frequentist-Bayesian difference into its two causes.
+    pairs = tuple(itertools.combinations(headline, 2)) + (
+        (B.BAYES_MODEL, B.BAYES_MEAN_MODEL),
+        (B.BAYES_MEAN_MODEL, "garch_mle"),
+    )
+
+    tables = {
+        "eval_point_losses": pd.concat(
+            [
+                E.point_loss_table(scored, scored_models, sample_label="own days"),
+                E.point_loss_table(
+                    scored, headline, sample_label="common sample", dates=common
+                ),
+            ],
+            ignore_index=True,
+        ),
+        "eval_coverage": pd.concat(
+            [
+                E.coverage_table(scored, scored_models, sample_label="own days"),
+                E.coverage_table(
+                    scored, headline, sample_label="common sample", dates=common
+                ),
+            ],
+            ignore_index=True,
+        ),
+        "eval_var_backtests": pd.concat(
+            [
+                E.var_backtest_table(scored, scored_models, sample_label="own days"),
+                E.var_backtest_table(
+                    scored, headline, sample_label="common sample", dates=common
+                ),
+            ],
+            ignore_index=True,
+        ),
+        "eval_pit": pd.concat(
+            [
+                E.pit_table(scored, scored_models, sample_label="own days"),
+                E.pit_table(
+                    scored, headline, sample_label="common sample", dates=common
+                ),
+            ],
+            ignore_index=True,
+        ),
+        "eval_comparisons": E.comparison_table(scored, pairs),
+        "eval_decomposition": E.decomposition_table(scored),
+    }
+
+    coverage = tables["eval_coverage"]
+    own = coverage[coverage["sample"] == "own days"]
+    print("interval coverage, empirical against nominal (own days)")
+    for model in headline:
+        block = own[own["model"] == model].sort_values("nominal")
+        cells = "  ".join(
+            f"{row.nominal:.0%}: {row.empirical:.4f}" for row in block.itertuples()
+        )
+        print(f"  {model:<18} n={block['n'].iloc[0]:,}  {cells}")
+
+    var_table = tables["eval_var_backtests"]
+    var_own = var_table[var_table["sample"] == "own days"]
+    print()
+    print("99% VaR backtests (own days). Christoffersen independence is the money test.")
+    for model in headline:
+        row = var_own[var_own["model"] == model].iloc[0]
+        print(
+            f"  {model:<18} {row.breaches:>3} breaches / "
+            f"{row.nominal_rate * row.n:.0f} expected   "
+            f"Kupiec p={row.kupiec_p:.4f}  independence p={row.independence_p:.4f}  "
+            f"conditional p={row.conditional_coverage_p:.4f}"
+        )
+
+    losses = tables["eval_point_losses"]
+    qlike = losses[(losses["loss"] == "qlike") & (losses["sample"] == "common sample")]
+    print()
+    print(f"mean QLIKE on the common sample (n = {len(common):,}), 95% block-bootstrap CI")
+    for row in qlike.sort_values("mean").itertuples():
+        print(f"  {row.model:<18} {row.mean:.4f}  [{row.ci_lower:.4f}, {row.ci_upper:.4f}]")
+
+    comparisons = tables["eval_comparisons"]
+    print()
+    print("pairwise QLIKE comparisons -- the bootstrap interval carries the conclusion,")
+    print("not the DM p-value (estimated parameters, multiplicity: see the docstring).")
+    for row in comparisons.itertuples():
+        verdict = "separates" if row.boot_excludes_zero else "cannot separate"
+        print(
+            f"  {row.model_a:<18} vs {row.model_b:<18} n={row.n:,}  "
+            f"d={row.mean_differential:+.5f}  DM p={row.dm_p:.4f}  "
+            f"boot [{row.boot_lower:+.5f}, {row.boot_upper:+.5f}]  {verdict}"
+        )
+
+    decomposition = tables["eval_decomposition"]
+    print()
+    print("interval width, decomposed (D29). Never quote the reported row as parameter")
+    print("uncertainty: at 99% the two causes point in opposite directions.")
+    for level in (0.90, 0.95, 0.99):
+        block = decomposition[
+            (decomposition["nominal"] == level) & (decomposition["regime"] == "all")
+        ].set_index("contrast")
+        cells = "  ".join(
+            f"{name}: {block.loc[name, 'mean_width_ratio']:.4f}" for name in block.index
+        )
+        print(f"  {level:.0%}  {cells}")
+
+    print()
+    for name, table in tables.items():
+        path = PROCESSED_DIR / f"{name}.csv"
+        table.to_csv(path, index=False)
+        print(f"wrote {path}  ({len(table)} rows)")
 
 
 def stage_figures(args: argparse.Namespace) -> None:
-    """Render figures from the persisted evaluation tables."""
-    raise NotImplementedError("stage 'figures' not implemented")
+    """Render figures from the persisted evaluation tables.
+
+    Every figure is a function of the tables ``--stage evaluate`` wrote, so a figure
+    and the number it draws can never disagree.
+    """
+    import pandas as pd
+
+    from src import backtest as B
+    from src import evaluation as E
+    from src import figures
+
+    forecast_path = PROCESSED_DIR / "forecasts.csv"
+    coverage_path = PROCESSED_DIR / "eval_coverage.csv"
+    if not coverage_path.exists():
+        raise SystemExit(
+            f"{coverage_path} not found. Run `python run_all.py --stage evaluate` first."
+        )
+    scored = E.score_forecasts(pd.read_csv(forecast_path, parse_dates=["date"]))
+    coverage = pd.read_csv(coverage_path)
+    decomposition = pd.read_csv(PROCESSED_DIR / "eval_decomposition.csv")
+
+    headline = B.HEADLINE_MODELS
+    own = coverage[coverage["sample"] == "own days"]
+
+    written = [
+        figures.plot_pit_histograms(
+            scored, FIGURES_DIR / "08_pit_histograms.png", models=headline
+        ),
+        figures.plot_coverage_vs_nominal(
+            own, FIGURES_DIR / "09_coverage_vs_nominal.png", models=headline
+        ),
+        figures.plot_var_hit_sequence(
+            scored, FIGURES_DIR / "10_var_hit_sequence.png", models=headline
+        ),
+        figures.plot_interval_decomposition(
+            decomposition, FIGURES_DIR / "11_interval_decomposition.png"
+        ),
+    ]
+    print()
+    for path in written:
+        print(f"wrote {path}")
 
 
 STAGES = {

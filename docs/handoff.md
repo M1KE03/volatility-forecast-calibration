@@ -1,16 +1,14 @@
 # Handoff: how to continue
 
-**State as of 2026-08-26. Stage 3 complete.** All four forecasters exist, plus two
-ablations, each with a forecast table over the 2,134-day evaluation window.
-The Bayesian GARCH(1,1)-t is fitted by NUTS at each of the 102 refit dates and carries its
-whole posterior into the predictive. 100 of the 102 refits converged; the two that did not
-leave 42 evaluation days without a Bayesian forecast, which is a fact about the model
-rather than a gap to be filled. 231 tests pass, plus one skipped by default (§1 explains which). `evaluation.py` and `bootstrap.py` are
-still entirely stubs, and they are the next thing.
+**State as of 2026-08-27. Stage 4 complete.** All four forecasters exist, plus two
+ablations, each with a forecast table over the 2,134-day evaluation window. The
+evaluation layer scores all of it and writes six tables and four figures from
+`forecasts.csv` alone, refitting nothing. `evaluation.py` and `bootstrap.py` are complete.
+**Stage 5, the regime-conditional analysis, is next**, and most of its machinery already
+exists.
 
-**Read §4 before you read a single number out of `forecasts.csv`.** The Bayesian
-intervals came out narrower than the frequentist ones, and the reason is not the one the
-project has been expecting.
+**Read §4 before you quote a single number.** The headline results are not the ones the
+governing plan anticipated — in two different places, and in opposite directions.
 
 This document is written for whoever picks the project up next — including a future
 session of the same work. It assumes no memory of how anything got here.
@@ -35,7 +33,9 @@ python run_all.py --stage data       # cached; no network unless --refresh
 python run_all.py --stage eda        # diagnostics + 4 figures
 python run_all.py --stage backtest   # baselines + GARCH + 3 figures (~1 min)
 python run_all.py --stage bayes      # the Bayesian track (~95 min)
-pytest -q                            # expect 231 passed, 1 skipped (~14 min)
+python run_all.py --stage evaluate   # every table, from forecasts.csv (~15s)
+python run_all.py --stage figures    # figures 08-11, from those tables (~5s)
+pytest -q                            # expect 321 passed, 1 skipped (~13 min)
 pytest -m "not slow" -q              # inner loop (~2 min)
 pytest --bayes-audit -m bayes_audit   # the audit with NUTS itself (~40 min); run at §1.15
 ```
@@ -48,6 +48,10 @@ are on disk, so re-running the cheap one never re-runs the expensive one and the
 evaluation layer still reads one table. The merge compares the two configs and refuses to
 join runs made under different ones (D24).
 
+**`evaluate` and `figures` are cheap and re-runnable at will.** Neither refits anything.
+`evaluate` reads `forecasts.csv` and writes six `eval_*.csv` tables; `figures` reads only
+those tables, so a figure and the number it draws cannot disagree.
+
 **One prerequisite `pip` does not supply: a C/C++ compiler on `PATH`.** PyMC's PyTensor
 backend needs one. This machine uses MinGW-w64 GCC 16.2.0 (UCRT, x86_64) at
 `C:\Users\micha\toolchains\mingw64`, already on the user `PATH`. Verify:
@@ -59,7 +63,7 @@ python -c "import pytensor; print(pytensor.config.cxx)"
 
 If that second command prints an empty string on a new machine, install a compiler before
 touching the Bayesian track. Provenance and the verified SHA-256 are in `research_log.md`
-§1.6.
+§1.6. Nothing in Stages 4-7 needs it.
 
 ---
 
@@ -69,17 +73,22 @@ touching the Bayesian track. Provenance and the verified SHA-256 are in `researc
 |---|---|
 | `src/data.py` | **Complete.** Download, SHA-256 manifest, returns, Parkinson proxy, VIX regimes, `PROXY_SCALE_C`. |
 | `src/eda.py` | **Complete.** ARCH-LM, Ljung-Box, ADF, ACF (`series_acf` and `squared_return_acf`). |
-| `src/figures.py` | **Partial.** House style + 7 figures (Stages 0-2). More added per stage. |
+| `src/figures.py` | **Partial.** House style + 11 figures (Stages 0-4). More added per stage. |
 | `src/backtest.py` | **Complete.** The loop, both cadences, both tracks, the model registry, the partial/merge machinery, long-format output. |
 | `src/models.py` | **Complete.** Interface, both baselines, the shared likelihood, MLE, plug-in predictive, the frozen priors, `log_prior`/`log_posterior`, the PyMC/NUTS sampler, the mixture posterior predictive. |
-| `src/evaluation.py` | **All stubs** (10 functions). **Next.** |
-| `src/bootstrap.py` | **All stubs** (4 functions). **Next.** |
+| `src/evaluation.py` | **Complete.** QLIKE/MSE, coverage, PIT + KS, Kupiec, Christoffersen independence and conditional coverage, DM with HLN, regime summaries, `common_sample`, and the six result-table builders. |
+| `src/bootstrap.py` | **Complete.** Politis-Romano indices, mean CI, paired loss-differential and coverage-difference CIs. |
+
+Notebooks are the presentation layer and define no analysis logic: `01_eda.ipynb` and
+`02_results.ipynb` read from `src/` and from the persisted tables. They are committed
+**unexecuted**, with no stored outputs — `run_all.py` is what reproduces the results, and
+a notebook carrying its own outputs would be a second, unversioned source of numbers.
 
 Artefacts in `data/processed/`: `analysis_frame.csv` (2,890 rows), `forecasts.csv`
-(12,804 rows = 2,134 dates × 6 models), `refit_records.csv` (408 rows = 102 refits × 4
-fits, carrying parameter estimates and convergence verdicts for both estimators — one
-record per *fit*, so the two baselines share a row and so do the two Bayesian tracks), the
-per-track partials, and `backtest_config.json`.
+(12,804 rows = 2,134 dates × 6 models), `refit_records.csv` (408 rows), the per-track
+partials, `backtest_config.json`, and the Stage 4 tables — `eval_point_losses.csv`,
+`eval_coverage.csv`, `eval_var_backtests.csv`, `eval_pit.csv`, `eval_comparisons.csv`,
+`eval_decomposition.csv`.
 
 ---
 
@@ -102,164 +111,145 @@ existed.** They are stated once, in the block above `log_prior` in `models.py`, 
 `test_priors_are_the_ones_frozen_at_d4` breaks if any of them moves. Prior sensitivity is
 a Stage 6 robustness question, not a modelling knob.
 
+**The Stage 4 decisions (§1.16), and D29 above all.** No statement about parameter
+uncertainty may be sourced from `garch_bayes` against `garch_mle`. That comparison moves
+two things at once, and `eval_decomposition.csv` is the only place the two are separated.
+D28 (every table names its sample and carries its `n`), D30 (the DM lag rule) and D31
+(Giacomini-White stays out of scope) sit alongside it.
+
 **The never-cut list**, from the governing plan §5: the look-ahead audit, the
 Christoffersen test, bootstrap CIs on regime coverage, and the limitations section. If the
-budget runs out, cut from §5's ordered list — not from these.
+budget runs out, cut from §5's ordered list — not from these. Two of the four are now
+done; bootstrap CIs on regime coverage are Stage 5's, and the machinery is built.
 
 **Append-only log.** `research_log.md` is never edited to match a later result. New
 decisions get new numbered subsections; §1.12 supersedes parts of §1.10 exactly that way.
 
 ---
 
-## 4. Stage 3 — Bayesian GARCH(1,1)-t — **done**
+## 4. Stage 4 — the evaluation layer — **done**, and two results are not what was expected
 
-*The full record is `research_log.md` §1.10-1.13 and the Stage 3 changelog entry. What
-follows is only what Stage 4 needs to know.*
+*The full record is `research_log.md` §1.16 and the Stage 4 changelog entry. What follows
+is what Stage 5 and the write-up need to know.*
 
-**The run.** 102 refits at 4 chains x (1,000 tune + 1,000 draw), `target_accept` 0.95,
-82.5 minutes of sampling. **100 of 102 converged**; worst R-hat 1.0049, minimum
-`ess_bulk` 1,475, minimum `ess_tail` 972, four divergent transitions in total. The two
-failures (2025-02-10 and 2025-03-12) leave 42 of the 2,134 evaluation days without a
-Bayesian forecast, NaN in the table under D19 and not re-run.
+**The layer reproduces §1.13 exactly** from the stored table rather than from the run that
+produced it — 0.9975 / 0.9989 / 1.0032 for parameter uncertainty at 90 / 95 / 99, and
+0.9970 / 0.9926 / 0.9811 for the priors. Treat that as the evaluation code's own
+regression check: if those six numbers ever move without `forecasts.csv` moving, something
+in `evaluation.py` has broken.
 
-**The headline result is not the expected one, and §1.13-1.14 are not optional
-reading.** Bayesian intervals came out *narrower* than the frequentist plug-in at every
-level, and most in stress. The first instinct is that the mixture is not carrying
-parameter uncertainty. It is. `garch_bayes_mean` -- the plug-in at the posterior mean,
-built for exactly this (D27) -- splits the reported difference in two, over all 2,092 days
-with a Bayesian forecast:
+**Result 1 — the models separate on point accuracy, and the pair that matters does not.**
+The plan predicted the four would be hard to separate, with that difficulty as the setup
+for the calibration act. On the 2,092-day common sample, mean QLIKE is `garch_bayes`
+0.4577, `garch_mle` 0.4599, `ewma` 0.5239, `yesterday` 0.7809, and both GARCH models beat
+both baselines with bootstrap intervals nowhere near zero. The difficulty is *inside* the
+GARCH pair: `garch_mle` against `garch_bayes` is 0.0022, half a percent of the loss level,
+whose bootstrap interval `[+0.00019, +0.00418]` clears zero by a hair — and
+`garch_bayes_mean` against `garch_mle` does not clear it at all. **The report should say
+the separation is between GARCH and no GARCH, not between estimators.**
 
-| level | C/B parameter uncertainty | B/A the priors | C/A reported |
-|---|---|---|---|
-| 90% | 0.9975 | 0.9970 | 0.9945 |
-| 95% | 0.9989 | 0.9926 | 0.9915 |
-| 99% | **1.0032** | **0.9811** | 0.9842 |
+**Result 2 — the 99% VaR failure is in the level, not the timing, and the plan expected
+the reverse.** All four models fail Kupiec: 87 breaches for `yesterday`, 54 for `ewma`, 37
+for each GARCH model, against 21 expected; the least strongly rejected of the four,
+`garch_mle`, still at p = 0.002. **Christoffersen independence fires for none of
+them** — p = 0.67 and 0.69 for the GARCH models, 0.76 for `yesterday`, and 0.058 for
+`ewma`, the only one close. Breaches are too many, but they are not clustered.
 
-Parameter uncertainty widens the 99% interval by 0.32%, narrows the shoulders, and crosses
-over between 95% and 99% -- exactly the leptokurtosis of §1.11, exactly what the tests
-demand. It is simply **small**, which the governing plan's risk register predicted, and it
-is swamped by the priors moving the point estimate.
+The plan called Christoffersen the money test on the argument that correct *average*
+coverage can hide clustered failures. Here the average coverage is wrong and the
+clustering is absent — the mirror image. That is a finding, not a null result, and it is
+the most interesting thing in the stage: a test that does not fire is evidence only if it
+had the power to. **Say which of the two failure modes each model exhibits, and do not
+recycle the plan's sentence about Christoffersen as though it had been borne out.**
 
-**And the regime story belongs entirely to the priors.** At the 99% level C/B is flat
-across regimes -- 1.0036 calm, 1.0031 normal, 1.0027 stressed -- while B/A runs 0.9927,
-0.9766, 0.9683. "The Bayesian intervals behave differently in a crisis" is true of the
-reported comparison and false of parameter uncertainty. Say which one you mean.
+**Result 3 — parameter uncertainty changes no coverage number at all.** `garch_bayes` and
+`garch_bayes_mean` have identical coverage at every level and identical 99% breach counts,
+to the last digit, despite different interval widths. Parameter uncertainty moves the 99%
+width by 0.32%; nothing in 2,092 days of returns lands in the gap. That is the cleanest
+statement of the project's central measurement and it belongs in the write-up: **at
+n ≥ 750, integrating over parameter uncertainty is not what determines whether a risk
+model's intervals are calibrated.** The governing plan's risk register called this
+outcome and it has arrived.
 
-Five things carry into Stage 4.
+**Coverage and PIT, for reference.** `garch_mle` runs 0.8889 / 0.9522 / 0.9897 against
+nominal 0.90 / 0.95 / 0.99, `garch_bayes` 0.8886 / 0.9517 / 0.9890 — under-covering at 90
+and 99, indistinguishable from each other everywhere. Both GARCH-t models pass the KS test
+on the PIT (p = 0.115 and 0.175); `ewma` fails at 3e-14, `yesterday` at 1e-7, and
+`garch_mle_normal` at 2.6e-4, which is Stage 6's innovation ablation arriving early and
+pointing the way it was expected to.
 
-1. **The two models genuinely share one likelihood, and this is now verified rather
-   than asserted.** `test_the_pymc_graph_and_the_numpy_log_posterior_agree` evaluates the
-   PyMC graph and `garch11_t_loglik` at the same parameter vector and requires they agree
-   to floating point — up to `log(1 - alpha)`, the deliberate difference between a prior
-   stated over `delta` (PyMC samples it) and one stated over `beta` (`log_prior` states
-   it, with the change-of-variable Jacobian route B would need). What that buys is
-   narrower than the sentence this project has been repeating: the two models share a
-   likelihood, so they differ in the *estimator*, not in the model. It does **not** follow
-   that their interval difference is parameter uncertainty -- see point 3.
+**Four things about how to read the tables.**
 
-2. **The Bayesian predictive is not wider at every level, and the previous version of
-   this document was wrong to say it should be.** It said intervals should be ≥
-   frequentist at every level and to hunt for the shared-`h_next` bug otherwise. A scale
-   mixture holding average variance fixed is leptokurtic against the single distribution
-   at that average — more peaked in the middle, heavier in the tails — so the ratio
-   crosses 1 somewhere between 90% and 95%. Measured on a dispersed posterior: 0.995 at
-   90%, 1.002 at 95%, 1.017 at 99%, 1.032 at 99.8%. Verified against four million draws
-   from the same mixture before the claim rather than the code was changed. See
-   problems-and-solutions #38, and the two tests that pin either side of the crossover.
-
-3. **The one-cause comparison is not currently one cause, and this is the single most
-   important thing on this page.** The claim in the README, in the plan's interview
-   ammunition, and until now in this document -- *models 3 and 4 share a likelihood, so
-   any interval difference is parameter uncertainty, full stop* -- is true of the
-   posterior predictive against a plug-in **at the posterior mean**. It is false of the
-   posterior predictive against a plug-in **at the MLE**, which is what `forecasts.csv`
-   holds, because those are two different point estimates and the priors move one of them.
-
-   Two priors move it, both frozen at D4 long before any of this was visible, and both
-   pushing the same way. `beta = (1 - alpha) * delta` with `delta ~ Beta(3, 1)` keeps
-   `alpha + beta < 1` by construction and so pulls persistence off the boundary the MLE
-   runs into -- mean 0.9786 against 0.9893, and the MLE reaches 0.99998 in 16 of the 102
-   refits while the posterior never passes 0.991. Lower persistence means less carry-over
-   after a shock, which is why the gap is widest in the stressed regime. And the `nu`
-   prior has mean 14, leaning near-normal, so posterior `nu` sits above the MLE (5.51
-   against 5.20) and thins the Bayesian tails exactly at 99%.
-
-   **So do not attribute the frequentist-Bayesian interval difference to parameter
-   uncertainty.** Decompose it — the machinery is now there. `garch_bayes_mean` (D27) is
-   the plug-in predictive at the posterior mean, produced from the same fits inside the
-   same loop, and it splits the comparison:
-
-       garch_bayes / garch_bayes_mean   -- parameter uncertainty, and nothing else
-       garch_bayes_mean / garch_mle     -- the priors, and nothing else
-
-   It is an ablation in the sense `garch_mle_normal` is and stays out of the headline
-   table. Every interval statement the report makes about parameter uncertainty must come
-   from the first ratio, never from `garch_bayes` against `garch_mle`.
-
-4. **A failed refit means missing days, and the evaluation layer must handle them.**
-   Under D19 a Bayesian refit that fails its diagnostics produces no forecasts for the 21
-   days it serves; those rows are NaN in `forecasts.csv`, not absent. Here that is 42 days: two refits, 2025-02-10 and 2025-03-12.
-   Coverage and loss must be computed on the dates a model actually forecast, and every
-   pairwise comparison — the DM tests especially — must state the common sample it used.
-
-5. **`target_accept` is 0.95, not D17's 0.9** (D25), raised before the production run
-   after a smoke refit produced four divergences and therefore no forecasts. The report
-   must say so. It is a sampler effort parameter rather than a diagnostic threshold, and
-   the distinction is argued in §1.12; do not treat it as licence to tune other frozen
-   settings after seeing a result.
+1. **Every table names its sample and carries its `n` (D28).** Per-model rows use each
+   model's own days, so a four-model table mixes n = 2,134 and n = 2,092; every pairwise
+   comparison uses the *pairwise* intersection; and the headline tables are additionally
+   recomputed on the four-model common sample under the label `common sample`. Nothing is
+   inferable — read the column.
+2. **A missing forecast is an error, not a dropped row.** Every function in
+   `evaluation.py` and `bootstrap.py` raises on a non-finite input. If you get that error,
+   the fix is to select a sample with `evaluation.common_sample` and report its `n`, never
+   to filter the NaN away at the call site.
+3. **The ablations stay out of the headline tables**, filtered on
+   `backtest.HEADLINE_MODELS` (D15 for `garch_mle_normal`, D29 for `garch_bayes_mean`).
+   They are scored — they are in the `own days` rows of every table — but they are not
+   competitors.
+4. **Every p-value in `eval_comparisons.csv` is unadjusted** across eight pairwise
+   comparisons, and DM's asymptotics assume forecasts are not functions of estimated
+   parameters, which here they are. The bootstrap intervals carry the conclusions.
 
 ---
 
-## 5. Stage 4 — evaluation layer (3-4h). **The intellectual core. Start here.**
+## 5. Stage 5 — regime-conditional analysis (2–2.5h). **Start here.**
 
-QLIKE and MSE against the scaled proxy; DM tests with the Harvey-Leybourne-Newbold
-correction; PIT histograms; coverage tables at 90/95/99 and 99% VaR; Kupiec POF and
-**Christoffersen** independence and conditional coverage on the 99% VaR hit sequences.
+Split every Stage 4 statistic on the lagged-VIX label. Most of the machinery exists:
+`evaluation.summarise_by_regime` works on any loss or binary indicator column and returns
+`n` beside every statistic, `score_forecasts` already attaches `inside_<level>` and
+`exceedance` columns, and `bootstrap_coverage_difference` is built and tested.
 
-Everything reads `data/processed/forecasts.csv` and nothing re-runs the backtest.
+What Stage 5 owes:
 
-**Before any of it, settle §4 point 3.** The interval comparison the whole write-up turns
-on is currently confounded between the priors and parameter uncertainty, and every
-coverage table Stage 4 produces will inherit that confound. Deciding what to do about it
-after the tables exist is how a result gets chosen rather than found.
+- **Per-regime QLIKE ranking, coverage at each level, and the 99% breach rate**, per
+  model, with `n` on every row.
+- **Stationary-block-bootstrap CIs on every per-regime coverage estimate.** This is on the
+  never-cut list. Their width is itself on-theme: the stressed regime is 341 of the 2,092
+  days the Bayesian model forecasts, and an error bar that swallows the effect is the
+  honest answer.
+- **The likely headline figure:** coverage against nominal by regime, one panel per model
+  — the plot that shows whether 99% means 99% when VIX > 25.
+- **An explicit no-look-ahead statement for the regime definition.** The label is built
+  from the *lagged* VIX close, so the conditioning information was available when the
+  forecast was made; say so where the figure is introduced.
+- Sensitivity on trailing-realised-vol terciles, relegated to the robustness notebook and
+  third on the cut list.
 
-Expect the four models to be **hard to separate on point accuracy**. That is the setup for
-the calibration act, not a failure. Christoffersen is the money test: correct *average*
-coverage can hide breaches that cluster in crises, and clustering is the failure mode that
-actually ruins risk models.
-
-Four caveats belong in the report body, not a footnote:
-
-- DM's asymptotics assume forecasts are not functions of estimated parameters. Here they
-  are.
-- Models 3 and 4 share a likelihood, so their loss differential may be near-degenerate.
-  Return the differential variance so a reader can check rather than trust the p-value.
-- `garch_mle_normal` is an ablation and must stay out of the headline tables. Filter on
-  `backtest.HEADLINE_MODELS`, not on whatever happens to be in the forecast file (D15).
-- KS-uniformity p-values on the PIT are approximate because parameters are estimated.
-  Knowing that caveat is worth more than the test.
+Two cautions specific to this stage. First, `eval_decomposition.csv` is **already**
+regime-split, and its stressed-regime rows are the ones the write-up will want — the
+priors narrow the 99% interval by 3.2% on stressed days while parameter uncertainty widens
+it by 0.27%, flat across regimes. Do not recompute that by hand. Second, the per-regime
+subsamples are small and every test on them is underpowered; a Christoffersen test that
+does not fire on 341 days is close to uninformative, and the report should say so rather
+than report it as a pass.
 
 ---
 
-## 6. Stages 5-7, in brief
+## 6. Stages 6-7, in brief
 
-**Stage 5 — regime analysis (2-2.5h).** Split on the lagged-VIX label. **Report `n`
-alongside every statistic** — stressed days are 375 of 2,890, and a regime table without
-sample sizes invites over-reading. Bootstrap CIs on every per-regime coverage estimate are
-mandatory; their width is itself on-theme. Likely headline figure: coverage vs nominal by
-regime, one panel per model.
+**Stage 6 — robustness (1.5–2h).** GARCH-normal vs GARCH-t at 99% (already visible in the
+Stage 4 tables: it fails the PIT at 2.6e-4 and takes 53 breaches against 37 — write it up
+properly rather than re-deriving it). Refit cadence at 63 days. **QLIKE ranking on raw,
+unscaled Parkinson** — owed by D10. **Prior sensitivity across `Beta(10,2)`, `Beta(3,1)`
+and `Beta(1,1)` on `delta`** — owed by D4, and cheap to state though not to compute: it is
+a second and third Bayesian backtest, so budget for it or cut it explicitly rather than by
+omission.
 
-**Stage 6 — robustness (1.5-2h).** GARCH-normal vs GARCH-t at 99% (expect normal to fail
-hard). Refit cadence at 63 days. **QLIKE ranking on raw, unscaled Parkinson** — owed by
-D10. **Prior sensitivity across `Beta(10,2)`, `Beta(3,1)` and `Beta(1,1)` on `delta`** —
-owed by D4, and now cheap to state though not to compute: it is a second and third
-Bayesian backtest, so budget for it or cut it explicitly rather than by omission.
-
-**Stage 7 — write-up (3-4h).** Two pages. Never claim a model is better on a lower loss in
+**Stage 7 — write-up (3–4h).** Two pages. Never claim a model is better on a lower loss in
 one period; conclusions rest on bootstrap intervals, and an interval containing zero is a
 legitimate reportable finding. Keep the seven quantities distinct throughout: observed
 returns, the proxy, conditional variance forecasts, predictive intervals, VaR forecasts,
-parameter uncertainty, innovation uncertainty.
+parameter uncertainty, innovation uncertainty. The three §4 results above are the spine of
+the paper, and two of them contradict what the plan expected — say so plainly; a
+pre-registered protocol that produced a surprise is the most credible thing this project
+has.
 
 ---
 
@@ -272,15 +262,18 @@ These were promised in the log and must be honoured, not rediscovered:
 | QLIKE ranking on **raw** Parkinson, to show it does not hinge on `c` | D10 | 6 |
 | Report says proxy is *approximately unbiased on average* — **not** that proxy-robustness is restored | D10 | 7 |
 | Constant-mean simplification named as a limitation (raw-return Ljung-Box rejects out of sample) | §1.7 | 7 |
-| `garch_mle_normal` kept out of the headline four-model tables (filter on `HEADLINE_MODELS`) | D15 | 4, 5 |
+| ~~`garch_mle_normal` kept out of the headline four-model tables~~ **done** at Stage 4: every builder filters on `HEADLINE_MODELS`, and a test asserts it | D15 | — |
 | Near-boundary persistence (`alpha+beta` > 0.999 in 16 of 102 MLE refits) noted rather than discovered late | §1.9 | 7 |
 | Report states the `delta` prior was chosen on a structural criterion, with full-sample posterior summaries consulted for magnitude | §1.10 | 7 |
 | Prior sensitivity across all three `delta` candidates, on evaluation-window forecasts | §1.10 | 6 |
 | Report states `target_accept` was raised to 0.95 after a smoke refit diverged | §1.12 | 7 |
-| ~~`pytest --bayes-audit -m bayes_audit` run once, result recorded~~ **done**, §1.15: passed in 39m41s. Owed again only if the sampler, the model graph or `build_bayes_paths` changes | §1.12 | — |
-| Missing Bayesian days reported as a property of the model, and every comparison stating its common sample | D19 | 4 |
-| Frequentist-Bayesian interval differences **decomposed** via `garch_bayes_mean`, never attributed to parameter uncertainty on their own | §1.13, D27 | 4, 7 |
-| The README's "any interval difference is parameter uncertainty, full stop" corrected wherever it appears | §1.13 | 4 |
+| ~~`pytest --bayes-audit -m bayes_audit` run once, result recorded~~ **done**, §1.15. Owed again only if the sampler, the model graph or `build_bayes_paths` changes | §1.12 | — |
+| ~~Missing Bayesian days reported as a property of the model, every comparison stating its common sample~~ **done** at D28: enforced by refusal, and every table carries `sample` and `n` | D19 | — |
+| ~~Interval differences decomposed via `garch_bayes_mean`~~ **done** at D29: `eval_decomposition.csv`. The obligation now is *usage* — no report sentence may attribute the reported difference to parameter uncertainty | §1.13, D27 | 5, 7 |
+| ~~The README's "any interval difference is parameter uncertainty, full stop" corrected~~ **done** before Stage 4 | §1.13 | — |
+| Christoffersen's non-rejection reported as a non-rejection, with the power caveat, not as a pass | §1.16 | 5, 7 |
+| DM p-values reported as unadjusted across eight comparisons | §1.16 | 7 |
+| Bootstrap CIs on every per-regime coverage estimate (never-cut) | plan §5 | 5 |
 
 ---
 
@@ -315,28 +308,36 @@ Ordered by how much damage they do while looking fine.
 11. **Gating an expensive test with a marker deselection.** A command line's `-m` replaces
     an `addopts` one rather than adding to it, so the fast inner loop selected the
     forty-minute test (#40). The gate is now an explicit `--bayes-audit` flag.
+12. **Quoting `garch_bayes` against `garch_mle` as parameter uncertainty.** The project
+    said this in its plan, its README and an earlier version of this document, and it is
+    false against the MLE plug-in that `forecasts.csv` holds (#41). Every such statement
+    must come from `eval_decomposition.csv`'s first contrast.
+13. **Reading a non-rejection as a pass.** Christoffersen's independence test does not
+    fire for any model at 99% — on hit sequences of 37 breaches. That is a failure to
+    reject, on a small sample, and reporting it as evidence of well-timed breaches would
+    be the same error as reporting a wide bootstrap interval as agreement.
 
 ---
 
 ## 9. Budget
 
-The governing plan budgets ~15-20h total. Stages 0-3 account for roughly 11-12h of that;
-Stages 4-7 are estimated at 10-13h. **The plan is over its own budget**, which is what the
+The governing plan budgets ~15-20h total. Stages 0-4 account for roughly 14-15h of that;
+Stages 5-7 are estimated at 7-9h. **The plan is over its own budget**, which is what the
 cut list exists for. Cut in its stated order — the SV stretch goal is already out, then
 the refit-cadence sensitivity, then the trailing-vol regime sensitivity, then MSE as a
 secondary loss. Never the four never-cut items in §3.
 
-Note that the prior-sensitivity check owed by D4 is now a *Bayesian backtest per
-candidate prior*, roughly 95 minutes each. If it goes, it goes explicitly and into the
-limitations section, not by omission.
+Note that the prior-sensitivity check owed by D4 is a *Bayesian backtest per candidate
+prior*, roughly 95 minutes each. If it goes, it goes explicitly and into the limitations
+section, not by omission.
 
 ---
 
 ## 10. First three commands for the next session
 
 ```bash
-pytest -q                                             # confirm 231 pass, 1 skips, before touching anything
-python -c "import pandas as pd; f=pd.read_csv('data/processed/forecasts.csv'); print(f.groupby('model')['variance'].agg(['count','mean']))"
+pytest -q                                             # confirm 321 pass, 1 skips, before touching anything
+python -c "import pandas as pd; print(pd.read_csv('data/processed/eval_var_backtests.csv').to_string())"
 sed -n '1,60p' docs/project1-implementation-plan.md   # re-read the contract
 ```
 

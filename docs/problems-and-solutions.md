@@ -7,9 +7,10 @@ Companion to `research_log.md` and `README.md`.
 - This file is the **problem-oriented** view: every difficulty encountered so far, why it
   mattered, and the fix that is now in the repository.
 
-Scope: everything up to the end of **Stage 2** (frequentist GARCH complete,
-2026-08-23). The entries are grouped by the stage that produced them; nothing here yet
-concerns the Bayesian model or the evaluation layer.
+Scope: everything up to the end of **Stage 4** (evaluation layer complete, 2026-08-27).
+The entries are grouped by the stage that produced them. The summary table below covers
+entries 1-36, through Stage 2; entries 37 onward — the Bayesian model and the evaluation
+layer — are listed in full further down without a summary row.
 
 A note on what is included. Several entries are mistakes made during this work rather
 than external obstacles — a plan followed too long, a premise never tested, a test that
@@ -856,6 +857,38 @@ change.
 
 ---
 
+### 42. The money test did not fire, and the plan's sentence was ready anyway
+
+**Problem.** The governing plan names Christoffersen's independence test the money test,
+on the argument that correct *average* coverage can hide breaches that cluster in crises.
+The Stage 4 tables came back the other way round. All four models fail Kupiec at the 99%
+VaR -- 87, 54, 37 and 37 breaches against 21 expected -- and independence fires for none
+of them: p = 0.67 and 0.69 for the GARCH models, 0.76 for `yesterday`, 0.058 for `ewma`.
+The breaches are too many and they are not clustered.
+
+**Why it mattered.** Two ways to get this wrong, and the first was already half-written.
+The plan's sentence about clustered failure is quotable, and a write-up assembled from
+the plan would carry it into a results section where the tables say the opposite. The
+second is subtler: reading "independence does not reject" as "breaches are well timed".
+It is a failure to reject on hit sequences of 37 events, which is a small sample for a
+first-order Markov test; the honest reading is that the test had little power here, not
+that the models passed something. Both errors flatter the models, which is the direction
+that should always draw suspicion.
+
+**Solution.** The result is written up as what it is -- failure in the *level* of tail
+risk, not its *timing* -- in research_log.md's Stage 4 entry, and the non-rejection is
+recorded with its power caveat as an obligation in `docs/handoff.md` 7 so it cannot be
+quietly upgraded to a pass at the write-up. The test itself is unchanged and stays on the
+never-cut list: a diagnostic that does not fire is still worth running, and knowing which
+of two failure modes a model has is exactly what it bought.
+
+**Generalisation.** A pre-registered expectation is a hypothesis, not a template for the
+results section. When the tables contradict the plan, the finding is the contradiction --
+and the sentence in the plan is the thing that has to change, in the write-up, not in the
+plan itself, which is the contract and stays as written.
+
+---
+
 ## Still open
 
 Carried forward deliberately, not overlooked:
@@ -878,6 +911,11 @@ Carried forward deliberately, not overlooked:
   Bayesian model enforces the same constraint by construction, so the posterior will
   press against the same edge. Worth a sentence in the report rather than a discovery
   at Stage 7.
-- **Fitted tails slightly fatter than the residuals warrant.** The warm-up QQ plot puts
-  the empirical standardised residuals inside the fitted t at both ends. Whether that
-  turns into over-coverage at 99% is a Stage 4 question and is left to Stage 4.
+- ~~**Fitted tails slightly fatter than the residuals warrant.**~~ **Answered at Stage 4,
+  and the answer is the opposite of the worry.** The warm-up QQ plot put the empirical
+  standardised residuals inside the fitted t at both ends, which suggested over-coverage
+  at 99%. Out of sample there is *under*-coverage: `garch_mle` covers 0.9897 against a
+  nominal 0.99 two-sided, and on the one-sided 99% VaR both GARCH models take 37 breaches
+  against 21 expected, rejecting Kupiec at p = 0.002. What the warm-up window suggested
+  about the tails did not survive the evaluation window, which is its own small lesson
+  about diagnosing a model on the sample it was fitted to.

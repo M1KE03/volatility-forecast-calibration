@@ -992,6 +992,80 @@ across all 102 refits, with the real sampler in the loop.
 
 It is not owed again unless the sampler, the model graph, or `build_bayes_paths` changes.
 
+### 1.16 Decided at Stage 4, before any table was built (2026-08-27)
+
+Four decisions, all taken and written down before `evaluation.py` produced a number. The
+order matters: three of the four change what the headline tables say, and deciding them
+after seeing the tables would be choosing a result rather than finding one.
+
+**D28 — the common sample, and the refusal to pick one silently.**
+Two Bayesian refits failed their diagnostics, so `garch_bayes` and `garch_bayes_mean`
+have no forecast on 42 of the 2,134 evaluation days (D19). Every statistic therefore has
+to say which days it was computed on. The rule:
+
+- **Per-model marginals** — mean loss, coverage, breach counts, PIT — use each model's
+  own available days. The four-model tables therefore mix n = 2,134 and n = 2,092 rows,
+  and every row carries its `n` and a `sample` label.
+- **Every cross-model comparison** — DM, bootstrap differentials, coverage differences —
+  uses the *pairwise* intersection, so a pair of frequentist models is compared on 2,134
+  days and any pair involving a Bayesian model on 2,092. The `n` is a column.
+- The headline tables are additionally recomputed on the four-model common sample
+  (2,092 days), written alongside under the label `common sample`, so a reader can see
+  whether the 42 days move anything. They do not, at the resolution reported.
+
+Enforced rather than documented: every scoring function in `evaluation.py` and every
+function in `bootstrap.py` **raises** on a non-finite input instead of dropping it. A
+dropped NaN would compute a statistic on a sample nobody stated, inside a function whose
+output is an error bar. `evaluation.common_sample` is the only way to select a sample and
+it returns dates, so the choice is always visible at the call site.
+
+**D29 — the interval comparison is reported through the decomposition, never raw.**
+Settled before the coverage tables existed, because every one of them would otherwise
+inherit the confound 1.13 exposed. `garch_bayes` against `garch_mle` moves two things at
+once — the posterior is integrated over rather than maximised, *and* the frozen D4 priors
+move the point estimate — so:
+
+- The headline tables hold the four `HEADLINE_MODELS` only. The frequentist-Bayesian row
+  in them is labelled *the reported difference* and is never described as parameter
+  uncertainty.
+- `garch_bayes_mean` is an ablation in the sense `garch_mle_normal` is (D15), kept out of
+  the headline tables and given its own table, `eval_decomposition.csv`, built by
+  `evaluation.decomposition_table`. It carries all three contrasts at all three levels,
+  overall and by regime, with each side's coverage next to each width ratio.
+- Every interpretive statement about parameter uncertainty is sourced from
+  `garch_bayes / garch_bayes_mean`. The report may quote the reported difference as such,
+  and must not decompose it by assertion.
+
+The stage's own run reproduces 1.13's numbers exactly from the stored table — 0.9975,
+0.9989, 1.0032 for parameter uncertainty at 90/95/99 and 0.9970, 0.9926, 0.9811 for the
+priors — which is a check on the evaluation layer as much as a restatement.
+
+**D30 — Diebold-Mariano lag truncation: Newey-West automatic, `floor(4 (n/100)^(2/9))`.**
+The textbook one-step-ahead DM test uses no lags, on the argument that an optimal
+one-step forecast has a serially uncorrelated error. These forecasts are not optimal and
+the QLIKE differential is visibly autocorrelated — variance regimes persist for weeks —
+so a HAC correction is applied rather than assumed away. At n = 2,092 the rule gives 7
+lags. Fixed in `evaluation.newey_west_lag` before any test was run, and the lag actually
+used is returned on every result so a reader never has to ask. The Harvey-Leybourne-
+Newbold small-sample correction is applied at h = 1 and the statistic referred to a `t`
+distribution on n-1 degrees of freedom. Where a finite sample makes the Bartlett-weighted
+sum non-positive, the fallback is the contemporaneous variance and the returned lag drops
+to 0, so the fallback is visible rather than silent.
+
+**D31 — Giacomini-White stays out.**
+Raised as archived-plan D3 and withdrawn with it at 1.5 as never-authorised scope. It is
+the theoretically better-suited test here — it is valid under estimation uncertainty with
+a rolling scheme, which is exactly this setting — and Stage 4 is where it would be
+tempting to add it back, having just written the DM caveats down. It is not added. The
+block bootstrap carries the conclusions instead, which is what the locked design says,
+and the DM caveat about estimated parameters is reported rather than engineered away.
+
+**One thing Stage 4 does *not* decide.** The KS test on the PIT is reported with its
+p-value flagged approximate — the predictive distributions have estimated, rolling-
+refitted parameters — and `UniformityResult` carries `p_value_is_approximate` as a field
+rather than a comment, so the caveat survives into any table built from it. The histogram
+is the diagnostic; the test is a summary of it.
+
 ---
 
 ## 2. Changelog
@@ -1453,3 +1527,86 @@ to parameter uncertainty**, which is what this project has been saying it would 
 
 Next: Stage 4, the evaluation layer. Everything it needs is in `forecasts.csv`; it should
 re-run no part of the backtest.
+
+### Stage 4 -- evaluation layer (2026-08-27)
+
+`evaluation.py` and `bootstrap.py` are complete, `run_all.py --stage evaluate` and
+`--stage figures` are implemented, and six tables, four figures and `02_results.ipynb`
+come out of the stored forecast table. Nothing in this stage refits anything: every number is a function of
+`forecasts.csv`, so none of it can move unless the backtest moves first. 321 tests pass
+and one is skipped by default, in 12m40s: 92 new tests in `tests/test_evaluation.py` and
+`tests/test_bootstrap.py`, against two removed from `test_smoke.py` -- the parametrised
+`test_unimplemented_stages_still_raise` emptied when `evaluate` and `figures` landed, and
+a test parametrised over nothing collects nothing and asserts nothing.
+
+**Decisions before tables.** D28 (the common sample), D29 (the interval comparison
+reported only through the decomposition), D30 (the DM lag rule) and D31 (Giacomini-White
+stays out) are at 1.16, all written before the first table was built. D29 is the one the
+handoff insisted on: the coverage tables would otherwise have inherited 1.13's confound
+and the choice of what to do about it would have been made with the answers visible.
+
+**The evaluation layer reproduces 1.13 exactly**, from the stored table rather than from
+the run that produced it: parameter uncertainty 0.9975 / 0.9989 / 1.0032 at 90 / 95 / 99,
+the priors 0.9970 / 0.9926 / 0.9811. That agreement is a check on the new code, not a
+restatement of an old result.
+
+**Point accuracy: the models are separable, and the expected finding does not hold.** The
+governing plan predicted the four would be hard to separate, with that difficulty as the
+setup for the calibration act. On mean QLIKE over the 2,092-day common sample the ordering
+is `garch_bayes` 0.4577, `garch_mle` 0.4599, `ewma` 0.5239, `yesterday` 0.7809, and both
+GARCH models separate from both baselines with bootstrap intervals nowhere near zero. What
+*is* hard to separate is the pair the research question turns on: `garch_mle` against
+`garch_bayes` differs by 0.0022, half a percent of the loss level, on a differential whose
+variance is 0.00115. Its bootstrap interval excludes zero by a hair, `[+0.00019, +0.00418]`
+-- and `garch_bayes_mean` against `garch_mle` does not exclude it at all,
+`[-0.00394, +0.00034]`. The report should say the difference is between GARCH and no
+GARCH, not between estimators.
+
+**Calibration: the two GARCH-t models pass the PIT test and the baselines fail it
+decisively.** KS against uniform: `garch_bayes` p = 0.175, `garch_mle` p = 0.115, against
+`ewma` 3e-14 and `yesterday` 1e-7. `garch_mle_normal` fails at 2.6e-4, which is Stage 6's
+innovation ablation arriving early and pointing the way it was expected to. Every one of
+these p-values is approximate because the parameters are estimated, and the flag rides in
+the table rather than in a footnote.
+
+**Interval coverage is below nominal at 90% and 99% for every model.** `garch_mle` runs
+0.8889 / 0.9522 / 0.9897 against 0.90 / 0.95 / 0.99 and `garch_bayes` 0.8886 / 0.9517 /
+0.9890. The two are indistinguishable at every level -- which is the honest answer to the
+research question as posed, and it is the answer 1.13 predicted once the width differences
+turned out to be tenths of a percent.
+
+**The 99% VaR result, and it is not the shape the plan anticipated.** All four models fail
+Kupiec: 87 breaches for `yesterday`, 54 for `ewma`, 37 for each GARCH model against 21
+expected, and the least strongly rejected of the four, `garch_mle`, still at p = 0.002. **Christoffersen independence fires for none of
+them** -- p = 0.67 and 0.69 for the GARCH models, 0.76 for `yesterday`, 0.058 for `ewma`,
+which is the only one close. So the models fail on the *level* of tail risk and not on its
+*timing*: the breaches are too many but they are not clustered. The plan called
+Christoffersen the money test on the argument that correct average coverage can hide
+clustered failures; here the average coverage is wrong and the clustering is absent, which
+is the mirror image and no less reportable. Conditional coverage rejects for all four,
+driven entirely by its Kupiec component.
+
+**`garch_bayes` and `garch_bayes_mean` have identical 99% breach counts and identical
+coverage at every level**, to the last digit, despite different interval widths. Parameter
+uncertainty moves the 99% width by 0.32%; nothing in 2,092 days of returns lands in the
+gap. That is the cleanest statement of this project's central measurement, and it belongs
+in the report: at n = 750 and above, integrating over parameter uncertainty is not what
+determines whether a risk model's intervals are calibrated.
+
+**The proxy separation is asserted, not promised.** `test_scrambling_the_proxy_leaves_
+every_calibration_number_untouched` replaces `proxy_var` with a scaled permutation and
+requires every coverage, VaR, PIT and decomposition table to come back bit-identical, with
+a negative case requiring the point losses to move. Calibration is scored against observed
+returns and inherits none of the D2 proxy problem; that is now a test rather than a
+paragraph.
+
+**Two limits worth carrying forward.** The QLIKE numbers are on the scaled proxy and the
+raw-Parkinson ranking owed by D10 is still Stage 6's. And every p-value in
+`eval_comparisons.csv` is unadjusted across eight pairwise comparisons; the multiplicity
+caveat is in the docstring and belongs in the report body.
+
+Next: Stage 5, regime-conditional analysis. `summarise_by_regime` and
+`bootstrap_coverage_difference` are built and tested, the decomposition table is already
+regime-split, and the never-cut requirement is bootstrap CIs on every per-regime coverage
+estimate with `n` beside it -- stressed days are 341 of the 2,092 the Bayesian model
+forecasts.

@@ -13,7 +13,16 @@ Why this carries more weight than the Diebold-Mariano p-value: see the caveats i
 ``evaluation.diebold_mariano``. The bootstrap makes weaker assumptions about the loss
 differential and degrades more gracefully when the differential is small.
 
-All stubs. See research_log.md.
+Missing observations are refused, not dropped
+---------------------------------------------
+Every function here rejects a non-finite input rather than silently discarding it. Two
+of the six forecast models have no forecast on 42 of the 2,134 evaluation days -- two
+Bayesian refits failed their convergence diagnostics and produced nothing for the 21
+days each served (D19) -- so a NaN reaching this module means a caller has not yet said
+which sample it is comparing on. Dropping them here would make that choice invisibly,
+inside a function whose output is an error bar, and the resulting interval would not
+correspond to any stated sample. The common-sample decision belongs to the caller and
+must appear in the table it produces (D28).
 """
 
 from __future__ import annotations
@@ -56,6 +65,60 @@ class BootstrapCI:
     mean_block_length: int
     n_replications: int
 
+    @property
+    def excludes_zero(self) -> bool:
+        """Whether the interval lies strictly on one side of zero.
+
+        A convenience for difference statistics, and deliberately *not* named
+        ``significant``. An interval containing zero is a finding -- the sample cannot
+        separate the two models -- rather than a failed test.
+        """
+        return (self.lower > 0.0) or (self.upper < 0.0)
+
+
+def _check_series(name: str, values: np.ndarray) -> np.ndarray:
+    """Validate one input series: 1-D, non-empty, finite everywhere."""
+    array = np.asarray(values, dtype=float)
+    if array.ndim != 1:
+        raise ValueError(f"{name} must be one-dimensional, got shape {array.shape}")
+    if array.size < 2:
+        raise ValueError(
+            f"{name} must have at least two observations, got {array.size}"
+        )
+    if not np.all(np.isfinite(array)):
+        n_bad = int((~np.isfinite(array)).sum())
+        raise ValueError(
+            f"{name} contains {n_bad} non-finite value(s). The bootstrap will not "
+            "choose a sample on the caller's behalf: align the series on a stated "
+            "common sample first, and report the n that results (D28)."
+        )
+    return array
+
+
+def _check_pair(
+    a: np.ndarray, b: np.ndarray, *, names: tuple[str, str]
+) -> tuple[np.ndarray, np.ndarray]:
+    """Validate a paired input, which must be aligned observation by observation."""
+    array_a = _check_series(names[0], a)
+    array_b = _check_series(names[1], b)
+    if array_a.size != array_b.size:
+        raise ValueError(
+            f"paired series must be the same length, got {array_a.size} and "
+            f"{array_b.size}. They must already be aligned on the same dates."
+        )
+    return array_a, array_b
+
+
+def _percentile_interval(
+    replicates: np.ndarray, confidence: float
+) -> tuple[float, float]:
+    """Two-sided percentile interval at ``confidence``."""
+    if not 0.0 < confidence < 1.0:
+        raise ValueError(f"confidence must lie in (0, 1), got {confidence}")
+    tail = 100.0 * (1.0 - confidence) / 2.0
+    lower, upper = np.percentile(replicates, [tail, 100.0 - tail])
+    return float(lower), float(upper)
+
 
 def stationary_bootstrap_indices(
     n: int,
@@ -71,9 +134,32 @@ def stationary_bootstrap_indices(
     series. Block lengths are therefore geometric with the requested mean.
 
     Returns an integer array of shape ``(n_replications, n)``. Fully determined by
-    ``seed`` — the same seed must always give the same indices, and a test asserts it.
+    ``seed`` -- the same seed must always give the same indices, and a test asserts it.
     """
-    raise NotImplementedError("stationary_bootstrap_indices")
+    if n < 2:
+        raise ValueError(f"n must be at least 2, got {n}")
+    if mean_block_length < 1:
+        raise ValueError(
+            f"mean_block_length must be at least 1, got {mean_block_length}"
+        )
+    if n_replications < 1:
+        raise ValueError(f"n_replications must be at least 1, got {n_replications}")
+
+    rng = np.random.default_rng(seed)
+    p_new_block = 1.0 / float(mean_block_length)
+
+    # Both random streams are drawn up front so the loop below is a pure recursion over
+    # columns: where a new block starts take a fresh uniform position, otherwise step
+    # one observation forward, wrapping circularly at the end of the series.
+    starts = rng.integers(0, n, size=(n_replications, n))
+    new_block = rng.random((n_replications, n)) < p_new_block
+
+    indices = np.empty((n_replications, n), dtype=np.int64)
+    indices[:, 0] = starts[:, 0]
+    for t in range(1, n):
+        continued = (indices[:, t - 1] + 1) % n
+        indices[:, t] = np.where(new_block[:, t], starts[:, t], continued)
+    return indices
 
 
 def bootstrap_mean(
@@ -88,7 +174,61 @@ def bootstrap_mean(
 
     Used for mean QLIKE and mean variance-MSE.
     """
-    raise NotImplementedError("bootstrap_mean")
+    values = _check_series("series", series)
+    indices = stationary_bootstrap_indices(
+        values.size,
+        mean_block_length=mean_block_length,
+        n_replications=n_replications,
+        seed=seed,
+    )
+    replicates = values[indices].mean(axis=1)
+    lower, upper = _percentile_interval(replicates, confidence)
+    return BootstrapCI(
+        point_estimate=float(values.mean()),
+        lower=lower,
+        upper=upper,
+        confidence=confidence,
+        replicate_values=replicates,
+        seed=seed,
+        mean_block_length=mean_block_length,
+        n_replications=n_replications,
+    )
+
+
+def _paired_difference_ci(
+    a: np.ndarray,
+    b: np.ndarray,
+    *,
+    confidence: float,
+    mean_block_length: int,
+    n_replications: int,
+    seed: int,
+) -> BootstrapCI:
+    """Bootstrap the mean of ``a - b`` under a single shared index draw.
+
+    Differencing before resampling is what enforces the pairing: one index array is
+    drawn and applied to the differential itself, so no replicate can ever combine
+    model A on one set of dates with model B on another. See the two public wrappers.
+    """
+    indices = stationary_bootstrap_indices(
+        a.size,
+        mean_block_length=mean_block_length,
+        n_replications=n_replications,
+        seed=seed,
+    )
+    differential = a - b
+    replicates = differential[indices].mean(axis=1)
+    lower, upper = _percentile_interval(replicates, confidence)
+    return BootstrapCI(
+        point_estimate=float(differential.mean()),
+        lower=lower,
+        upper=upper,
+        confidence=confidence,
+        replicate_values=replicates,
+        seed=seed,
+        mean_block_length=mean_block_length,
+        n_replications=n_replications,
+    )
 
 
 def bootstrap_loss_differential(
@@ -108,10 +248,18 @@ def bootstrap_loss_differential(
     informative. This is the main correctness trap in the module and is covered by a
     test.
 
-    An interval containing zero means the sample cannot distinguish the two models —
+    An interval containing zero means the sample cannot distinguish the two models --
     which is a legitimate and reportable finding, not a failed experiment.
     """
-    raise NotImplementedError("bootstrap_loss_differential")
+    values_a, values_b = _check_pair(loss_a, loss_b, names=("loss_a", "loss_b"))
+    return _paired_difference_ci(
+        values_a,
+        values_b,
+        confidence=confidence,
+        mean_block_length=mean_block_length,
+        n_replications=n_replications,
+        seed=seed,
+    )
 
 
 def bootstrap_coverage_difference(
@@ -131,4 +279,20 @@ def bootstrap_coverage_difference(
     This is the headline uncertainty statement for the project's central claim, since
     the research question is about calibration rather than point accuracy.
     """
-    raise NotImplementedError("bootstrap_coverage_difference")
+    values_a, values_b = _check_pair(
+        inside_a, inside_b, names=("inside_a", "inside_b")
+    )
+    for name, values in (("inside_a", values_a), ("inside_b", values_b)):
+        if not np.all((values == 0.0) | (values == 1.0)):
+            raise ValueError(
+                f"{name} must be a binary indicator of the realised return falling "
+                "inside the interval; it contains values other than 0 and 1."
+            )
+    return _paired_difference_ci(
+        values_a,
+        values_b,
+        confidence=confidence,
+        mean_block_length=mean_block_length,
+        n_replications=n_replications,
+        seed=seed,
+    )

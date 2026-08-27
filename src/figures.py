@@ -278,6 +278,7 @@ MODEL_LABELS = {
     "garch_mle": "GARCH(1,1)-t, plug-in",
     "garch_mle_normal": "GARCH(1,1)-normal, plug-in (ablation)",
     "garch_bayes": "GARCH(1,1)-t, posterior predictive",
+    "garch_bayes_mean": "GARCH(1,1)-t, plug-in at the posterior mean (ablation)",
 }
 
 MODEL_COLOURS = {
@@ -286,6 +287,7 @@ MODEL_COLOURS = {
     "garch_mle": "#31456b",
     "garch_mle_normal": "#7a90bd",
     "garch_bayes": "#2e7d6b",
+    "garch_bayes_mean": "#7fb3a6",
 }
 
 
@@ -503,5 +505,240 @@ def plot_parameter_stability(records: pd.DataFrame, out_path: Path) -> Path:
     axes[0].set_title("GARCH(1,1) estimates across the 102 refits (expanding window)")
     axes[0].legend(loc="upper left")
     axes[-1].set_xlabel("refit date")
+    fig.tight_layout()
+    return _finish(fig, out_path)
+
+
+# --- Stage 4 figures ---------------------------------------------------------------
+
+
+def plot_pit_histograms(
+    scored: pd.DataFrame,
+    out_path: Path,
+    *,
+    models: tuple[str, ...],
+    bins: int = 20,
+) -> Path:
+    """PIT histograms, one panel per model, against the uniform density.
+
+    Finer than coverage at three fixed levels: coverage says an interval is too narrow,
+    the histogram says *where*. A U shape is a predictive that is too narrow overall; a
+    single tall left-hand bar is a left tail that is too thin, which is the failure that
+    matters for a risk model and the one a symmetric coverage number can hide.
+
+    The 45-degree reference is the uniform density, not a fitted curve. The KS test in
+    the companion table is a summary of this picture, and its p-value is approximate
+    because the predictive distributions have estimated parameters.
+    """
+    apply_house_style()
+    fig, axes = plt.subplots(2, 2, figsize=(8.2, 5.6), sharex=True, sharey=True)
+
+    for ax, model in zip(axes.flat, models):
+        values = scored.loc[
+            (scored["model"] == model) & scored["pit"].notna(), "pit"
+        ].to_numpy()
+        ax.hist(
+            values,
+            bins=bins,
+            range=(0.0, 1.0),
+            color=MODEL_COLOURS.get(model, COLOURS["returns"]),
+            alpha=0.85,
+            edgecolor="white",
+            linewidth=0.5,
+        )
+        ax.axhline(
+            len(values) / bins,
+            color=COLOURS["accent"],
+            linewidth=1.0,
+            linestyle="--",
+            label="uniform",
+        )
+        short = MODEL_LABELS.get(model, model).split(" (")[0]
+        ax.set_title(f"{short}   n = {len(values):,}", fontsize=9)
+        ax.set_xlim(0.0, 1.0)
+
+    for ax in axes[-1]:
+        ax.set_xlabel("PIT value")
+    for ax in axes[:, 0]:
+        ax.set_ylabel("days")
+    axes.flat[0].legend(loc="upper center")
+
+    fig.suptitle(
+        "Probability integral transform of the realised return, by model",
+        fontsize=10,
+        fontweight="semibold",
+    )
+    fig.tight_layout()
+    return _finish(fig, out_path)
+
+
+def plot_coverage_vs_nominal(
+    coverage: pd.DataFrame,
+    out_path: Path,
+    *,
+    models: tuple[str, ...],
+) -> Path:
+    """Empirical against nominal coverage at each level, one marker per model.
+
+    The 45-degree line is perfect calibration. Distance below it is an interval that is
+    too narrow -- the direction that matters, because it is the one that understates
+    risk. Sample size is in the caption rather than the axes: every point on this figure
+    is computed on the same stated sample.
+    """
+    apply_house_style()
+    fig, ax = plt.subplots(figsize=(5.6, 5.4))
+
+    # Both axes share one range and an equal aspect, so the reference line is a true
+    # 45 degrees and vertical distance below it can be read directly off the chart. The
+    # line is dashed and black rather than grey: one of the models is drawn in grey, and
+    # a reference that could be mistaken for a series is worse than none.
+    floor = min(0.90, float(coverage["empirical"].min())) - 0.015
+    ax.plot(
+        [floor, 1.0],
+        [floor, 1.0],
+        color="black",
+        linewidth=0.9,
+        linestyle="--",
+        alpha=0.6,
+        zorder=1,
+    )
+    midpoint = floor + 0.62 * (1.0 - floor)
+    ax.annotate(
+        "perfect calibration",
+        xy=(midpoint, midpoint),
+        xytext=(0, 5),
+        textcoords="offset points",
+        fontsize=7.5,
+        color="black",
+        alpha=0.6,
+        rotation=45,
+        rotation_mode="anchor",
+        ha="center",
+        va="bottom",
+    )
+    ax.set_xlim(floor, 1.0)
+    ax.set_ylim(floor, 1.0)
+
+    for model in models:
+        block = coverage[coverage["model"] == model].sort_values("nominal")
+        ax.plot(
+            block["nominal"],
+            block["empirical"],
+            marker="o",
+            markersize=5,
+            linewidth=1.2,
+            color=MODEL_COLOURS.get(model, COLOURS["returns"]),
+            label=MODEL_LABELS.get(model, model),
+            zorder=2,
+        )
+
+    ax.set_xticks([0.90, 0.95, 0.99])
+    ax.set_xlabel("nominal coverage")
+    ax.set_ylabel("empirical coverage")
+    ax.set_title("Does a 95% interval contain 95% of returns?")
+    ax.legend(loc="upper left", fontsize=7.5)
+    fig.tight_layout()
+    return _finish(fig, out_path)
+
+
+def plot_var_hit_sequence(
+    scored: pd.DataFrame,
+    out_path: Path,
+    *,
+    models: tuple[str, ...],
+    var_level: float = 0.99,
+) -> Path:
+    """Timeline of 99% VaR breaches per model, with the stress episodes shaded.
+
+    The project's headline figure, and the one that makes Christoffersen's point
+    visually. A model with the right *number* of breaches can still have put them all
+    inside one fortnight; that is visible here and invisible in a coverage table.
+
+    One row per model, a tick per breach, and the expected count printed against the
+    realised one so the two failure modes -- too many breaches, and breaches in the
+    wrong place -- can be read off the same picture.
+    """
+    apply_house_style()
+    fig, ax = plt.subplots(figsize=(9.0, 0.72 * len(models) + 1.9))
+
+    expected_rate = 1.0 - var_level
+    for row, model in enumerate(reversed(models)):
+        block = scored.loc[
+            (scored["model"] == model) & scored["exceedance"].notna()
+        ].sort_values("date")
+        breaches = block.loc[block["exceedance"] == 1.0, "date"]
+        colour = MODEL_COLOURS.get(model, COLOURS["returns"])
+
+        ax.hlines(row, block["date"].min(), block["date"].max(), color=COLOURS["grid"], linewidth=1.0)
+        ax.vlines(breaches, row - 0.28, row + 0.28, color=colour, linewidth=1.1)
+        ax.annotate(
+            f"{len(breaches)} breaches / {expected_rate * len(block):.0f} expected",
+            xy=(1.0, row),
+            xycoords=("axes fraction", "data"),
+            xytext=(6, -3),
+            textcoords="offset points",
+            fontsize=7.5,
+            color=colour,
+        )
+
+    ax.set_yticks(range(len(models)))
+    ax.set_yticklabels(
+        [MODEL_LABELS.get(m, m).split(" (")[0] for m in reversed(models)], fontsize=8
+    )
+    ax.set_ylim(-0.6, len(models) - 0.4)
+    ax.grid(axis="y", visible=False)
+    ax.set_xlabel("")
+    ax.set_title(
+        f"{var_level:.0%} VaR breaches: how many, and whether they arrive together"
+    )
+    shade_stress_periods(ax)
+    fig.tight_layout()
+    return _finish(fig, out_path)
+
+
+def plot_interval_decomposition(
+    decomposition: pd.DataFrame,
+    out_path: Path,
+    *,
+    nominal: float = 0.99,
+) -> Path:
+    """The two causes of the frequentist-Bayesian interval difference, side by side.
+
+    The comparison the project was designed around -- one likelihood, plug-in against
+    posterior predictive -- turned out to move two things at once against the MLE
+    plug-in that ``forecasts.csv`` holds (research_log.md 1.13). This figure is the
+    reason that correction is legible rather than a paragraph: at the 99% level the two
+    causes point in opposite directions, and the reported difference is the smaller,
+    prior-dominated net of them.
+    """
+    apply_house_style()
+    fig, ax = plt.subplots(figsize=(7.0, 3.8))
+
+    block = decomposition[decomposition["nominal"] == nominal]
+    contrasts = list(dict.fromkeys(block["contrast"]))
+    regimes = ["all", *(r for r in block["regime"].unique() if r != "all")]
+    width = 0.8 / len(contrasts)
+    palette = (COLOURS["returns"], COLOURS["accent"], COLOURS["muted"])
+
+    for offset, (contrast, colour) in enumerate(zip(contrasts, palette)):
+        rows = block[block["contrast"] == contrast].set_index("regime")
+        heights = [rows.loc[r, "mean_width_ratio"] - 1.0 for r in regimes]
+        ax.bar(
+            np.arange(len(regimes)) + offset * width,
+            heights,
+            width=width,
+            bottom=1.0,
+            color=colour,
+            label=contrast,
+        )
+
+    ax.axhline(1.0, color="black", linewidth=0.8)
+    ax.set_xticks(np.arange(len(regimes)) + width)
+    ax.set_xticklabels([f"{r}\n(n = {block[block['regime'] == r]['n'].iloc[0]:,})" for r in regimes])
+    ax.set_ylabel("mean interval width ratio")
+    ax.set_title(
+        f"What actually moves the {nominal:.0%} interval: the priors, or parameter uncertainty"
+    )
+    ax.legend(loc="lower left", ncol=3)
     fig.tight_layout()
     return _finish(fig, out_path)

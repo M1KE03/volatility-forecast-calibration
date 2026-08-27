@@ -1,18 +1,14 @@
 """Structural smoke tests for the scaffold.
 
 These assert only that the repository is laid out as designed and that every module
-imports. They deliberately do **not** test behaviour, because there is no behaviour
-yet — every function body raises ``NotImplementedError``.
+imports. They deliberately do **not** test behaviour: each module's behaviour is tested
+in its own file, and duplicating any of it here would mean two places to update and one
+of them going stale.
 
-Real tests arrive with each implementation stage. Two categories are planned and are
-recorded here so they are not forgotten:
-
-- Transformation tests: returns, the Parkinson estimator, the EWMA recursion, the
-  GARCH filter, and the stationary bootstrap's block-length distribution.
-- Look-ahead tests: that a forecast for date t is unchanged when every observation
-  from t onward is corrupted. That is the strongest available check that no future
-  information leaks into a forecast, and it will be applied to the analysis frame, the
-  estimation-window slicing, and the regime labels.
+Written at Stage 1 against a scaffold in which every function body raised
+``NotImplementedError``. Both categories it promised have since arrived and live where
+they belong -- transformation tests in ``test_data.py``, ``test_models.py`` and
+``test_bootstrap.py``, look-ahead tests in ``test_data.py`` and ``test_backtest.py``.
 """
 
 from __future__ import annotations
@@ -81,20 +77,9 @@ def test_entry_point_parser_builds() -> None:
     assert set(run_all.STAGES) == set(run_all.STAGE_ORDER)
 
 
-# Stages that have not landed yet. Entries are removed as each stage is implemented;
-# `data` and `eda` were removed at Stage 0, `backtest` at Stage 1. Behaviour for an
-# implemented stage is tested in that stage's own test module, not here.
-UNIMPLEMENTED_STAGES = ["evaluate", "figures"]
-
-
-@pytest.mark.parametrize("stage_name", UNIMPLEMENTED_STAGES)
-def test_unimplemented_stages_still_raise(stage_name: str) -> None:
-    """Stages not yet built fail loudly rather than appearing to succeed.
-
-    This list shrinks by one entry per stage. Its failure is a signal to update the
-    scaffold's story, not a bug.
-    """
-    run_all = importlib.import_module("run_all")
-    args = run_all.build_parser().parse_args(["--stage", "data"])
-    with pytest.raises(NotImplementedError):
-        run_all.STAGES[stage_name](args)
+# There was a `test_unimplemented_stages_still_raise` here, asserting that stages not yet
+# built failed loudly rather than appearing to succeed. Its list shrank by one entry per
+# stage -- `data` and `eda` at Stage 0, `backtest` at Stage 1, `bayes` at Stage 3 -- and
+# emptied at Stage 4 when `evaluate` and `figures` landed. It is removed rather than left
+# parametrised over nothing, which collects zero tests and quietly asserts nothing.
+# Behaviour for an implemented stage is tested in that stage's own test module.

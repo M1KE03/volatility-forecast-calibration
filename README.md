@@ -1,10 +1,12 @@
 # Trusting the Error Bars: Calibration of Frequentist vs Bayesian Volatility Forecasts
 
-**Status: Stage 3 complete. All four forecasters exist — both baselines, the frequentist
-GARCH(1,1)-t and the Bayesian GARCH(1,1)-t — plus the GARCH-normal ablation, each with a
-forecast table over the 2,134-day evaluation window. The Bayesian model is fitted by NUTS
-at each of the 102 refit dates, 100 of which converged. The look-ahead audit covers both
-estimators. `evaluation.py` and `bootstrap.py` are still stubs and are next.**
+**Status: Stage 4 complete. All four forecasters exist — both baselines, the frequentist
+GARCH(1,1)-t and the Bayesian GARCH(1,1)-t — plus two ablations, each with a forecast
+table over the 2,134-day evaluation window. The Bayesian model is fitted by NUTS at each
+of the 102 refit dates, 100 of which converged. The look-ahead audit covers both
+estimators. The evaluation layer scores all of it: point losses, PIT, interval coverage,
+Kupiec and Christoffersen, Diebold-Mariano, and block-bootstrap intervals throughout.
+Stage 5, the regime-conditional analysis, is next.**
 
 Stage numbers follow [`docs/project1-implementation-plan.md`](docs/project1-implementation-plan.md),
 the governing plan.
@@ -176,6 +178,8 @@ python run_all.py --stage data      # build the analysis frame (implemented)
 python run_all.py --stage eda       # ARCH-LM, Ljung-Box, ADF + Stage 0 figures (implemented)
 python run_all.py --stage backtest  # walk-forward loop, baselines + MLE GARCH (~1 min)
 python run_all.py --stage bayes     # the Bayesian track, 102 NUTS fits (~95 min)
+python run_all.py --stage evaluate  # losses, coverage, VaR backtests, DM, bootstrap CIs
+python run_all.py --stage figures   # the report figures, from the evaluation tables
 python run_all.py --all             # run the full pipeline
 ```
 
@@ -196,7 +200,9 @@ window. Two of the 102 did, so `garch_bayes` has 2,092 of the 2,134 rows.
 pass `--refresh` to re-download, which deliberately replaces that snapshot. It prints the
 full data quality report and writes `data/processed/analysis_frame.csv`.
 
-The `evaluate` and `figures` stages still raise `NotImplementedError`.
+`--stage evaluate` reads `forecasts.csv` and refits nothing, writing six `eval_*.csv`
+tables to `data/processed/`; `--stage figures` draws only from those tables, so a figure
+and the number it plots cannot disagree. Both run in seconds.
 
 ## The scale convention
 
@@ -338,6 +344,40 @@ boundary. That is ordinary for a long daily equity sample containing 2020 and 20
 it is recorded because the Bayesian model at Stage 3 enforces the same constraint by
 construction and will press against the same edge.
 
+### What the evaluation layer establishes
+
+Full tables in `data/processed/eval_*.csv`, presented in `notebooks/02_results.ipynb`;
+figures 08-11. Three results, two of which are not what the governing plan expected.
+
+**Point accuracy separates GARCH from no GARCH, not one estimator from the other.** Mean
+QLIKE over the 2,092-day common sample: `garch_bayes` 0.4577, `garch_mle` 0.4599, `ewma`
+0.5239, `yesterday` 0.7809. Both GARCH models beat both baselines with block-bootstrap
+intervals nowhere near zero. `garch_mle` against `garch_bayes` differs by 0.0022 -- half a
+percent of the loss level -- and `garch_bayes_mean` against `garch_mle` cannot be
+separated at all.
+
+**The 99% VaR fails on the level of tail risk, not its timing.** Every model takes far too
+many breaches -- 87, 54, 37 and 37 against 21 expected -- and Kupiec rejects for all four.
+**Christoffersen's independence test rejects for none of them.** The plan called
+independence the money test on the argument that correct average coverage can hide
+clustered breaches; here the average coverage is wrong and the clustering is absent, which
+is the mirror image. A non-rejection on 37 events is a failure to reject on a small
+sample, not a demonstration that breaches are well timed, and the report says so.
+
+**Integrating over parameter uncertainty changes no coverage number.** `garch_bayes` and
+`garch_bayes_mean` have identical coverage at every level, in every regime, and identical
+99% breach counts -- despite the posterior predictive being 0.32% wider at 99%. Nothing in
+2,092 days of returns lands in that gap. At n >= 750, parameter uncertainty is not what
+determines whether a risk model's intervals are calibrated; that is the project's central
+measurement, and the governing plan's risk register called it.
+
+Both GARCH-t models pass a KS test of PIT uniformity (p = 0.115 and 0.175, approximate
+because the parameters are estimated) while `ewma` fails at 3e-14, `yesterday` at 1e-7 and
+the `garch_mle_normal` ablation at 2.6e-4.
+
+Regime-conditional versions of all of this, with bootstrap confidence intervals, are
+Stage 5.
+
 ### The analysis frame
 
 2,890 trading days, 2014-01-02 to 2025-06-30: 756 training rows (2014-01-02 to
@@ -373,8 +413,8 @@ and never reaches the analysis frame (decision D8 in `research_log.md`).
 │   ├── models.py          # shared likelihood, MLE, priors, NUTS, predictives
 │   ├── backtest.py        # walk-forward loop, refit schedule, two tracks, merge
 │   ├── figures.py         # house style, all figures
-│   ├── evaluation.py      # losses, coverage tests, DM        (stubs)
-│   └── bootstrap.py       # stationary block bootstrap        (stubs)
+│   ├── evaluation.py      # losses, PIT, coverage, VaR tests, DM, result tables
+│   └── bootstrap.py       # stationary block bootstrap
 ├── notebooks/             # thin presentation layer only
 ├── tests/
 ├── figures/
