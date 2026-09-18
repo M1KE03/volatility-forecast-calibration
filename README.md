@@ -1,19 +1,31 @@
 # Trusting the Error Bars: Calibration of Frequentist vs Bayesian Volatility Forecasts
 
-**Status: complete.** Every stage of the governing plan is delivered. Four forecasters —
-both baselines, the frequentist GARCH(1,1)-t and the Bayesian GARCH(1,1)-t — plus two
-ablations, each with a forecast table over the 2,134-day evaluation window. The Bayesian
-model is fitted by NUTS at each of the 102 refit dates, 100 of which converged. The
-evaluation layer scores all of it: point losses, PIT, interval coverage, Kupiec and
-Christoffersen, Diebold-Mariano, the regime split, and block-bootstrap intervals
-throughout. Robustness covers the proxy scale, the refit cadence, the regime definition,
-the innovation distribution, and a full re-run of the Bayesian backtest under each prior
-the design rejected. 351 tests pass, one skipped by design. **The pipeline reproduces byte
-for byte from a fresh clone, the NUTS-sampled track included.** The write-up is
-[`report/report.md`](report/report.md).
+**A GARCH model can pass the standard calibration test while every interval
+breach lands in the loss tail.** Over a 2,134-day out-of-sample window on SPY,
+both a frequentist and a Bayesian GARCH(1,1)-t put their exceptions
+overwhelmingly below the interval at every level — 156/81 at 90%, 77/25 at 95%,
+20/2 at 99%, against equal tails expected — rejecting symmetry at p between
+1.2 × 10⁻⁴ and 2.5 × 10⁻⁷. The cause is a standardised-residual skew of −0.79
+that a symmetric Student-t innovation has no parameter to represent. Meanwhile
+the PIT mean is 0.4998 and the KS test passes at p = 0.115: the misallocation
+cancels in aggregate, so the usual distributional check cannot see it.
 
-Stage numbers follow [`docs/project1-implementation-plan.md`](docs/project1-implementation-plan.md),
-the governing plan.
+![Where the interval breaches land](figures/14_tail_allocation.png)
+
+**Integrating over parameter uncertainty changes no coverage number.** The
+posterior predictive is 0.32% wider at 99% than the plug-in at its own posterior
+mean — exactly what theory predicts — and the two have identical coverage at
+every level, in every regime, and identical breach counts. Nothing in 2,092 days
+of returns lands in that gap, and re-running the whole Bayesian backtest under
+each rejected prior leaves that figure identical to four decimal places.
+Changing the innovation distribution, by contrast, moves 99% coverage from
+0.9775 to 0.9897. **The error bars are set by the distributional assumption,
+not by the treatment of parameters.**
+
+**Status: complete.** 351 tests pass, one skipped by design; the pipeline
+reproduces byte for byte from a fresh clone, the NUTS-sampled track included.
+Write-up: [`report/report.md`](report/report.md). Picking this up cold:
+[`docs/handoff.md`](docs/handoff.md).
 
 ## Research question
 
@@ -29,12 +41,9 @@ calibration.
 
 ## Findings
 
-![Where the interval breaches land](figures/14_tail_allocation.png)
-
-**1. The intervals are the wrong shape, not just the wrong width — and the standard
-calibration test cannot see it.** Under a symmetric predictive the two tails should be
-equally populated whatever the model gets wrong about scale. For both GARCH models they are
-not, at every level:
+The counts behind the opening — under a symmetric predictive the two tails should be
+equally populated whatever the model gets wrong about scale, and for both GARCH models
+they are not, at every level:
 
 | level | GARCH-t below / above | expected each tail | symmetry test |
 |---|---|---|---|
@@ -44,25 +53,12 @@ not, at every level:
 
 The standardised residuals carry a skew of **−0.79 (p ≈ 10⁻⁴⁰)**: the GARCH filter removes
 the volatility clustering and leaves the asymmetry untouched, because a constant-mean model
-with symmetric Student-t innovations has no parameter that could represent it. Meanwhile
-the PIT mean is **0.4998**, so the misallocation cancels in aggregate and the KS test passes
-at p = 0.115. A model can satisfy the usual distributional check while its loss tail — the
-entire reason a risk desk asks for the interval — is systematically too thin.
+with symmetric Student-t innovations has no parameter that could represent it.
 
 The naive baseline is *not* asymmetric at any level; it is simply too narrow. Wrong shape
 and wrong scale are different failures, and only one of them shows up in a coverage number.
 
-**2. Integrating over parameter uncertainty changes no coverage number.** The posterior
-predictive is 0.32% wider than the plug-in at its own posterior mean at the 99% level —
-exactly what theory predicts — and the two have *identical* coverage at every level, in
-every regime, and identical breach counts. Nothing in 2,092 days of returns lands in that
-gap. Re-running the whole Bayesian backtest under each prior the design rejected leaves that
-0.32% **identical to four decimal places**, so the measurement is not hostage to the prior.
-Choosing the innovation distribution, by contrast, moves 99% coverage from 0.9775 to 0.9897.
-**The error bars are set by the distributional assumption, not by the treatment of
-parameters.**
-
-**3. No evidence that tail calibration degrades in high volatility.** Both GARCH models
+**1. No evidence that tail calibration degrades in high volatility.** Both GARCH models
 breach their 99% VaR at a rate indistinguishable from nominal when VIX is below 15 (1.19%)
 *and* above 25 (1.15%, 1.47%), and clearly too often in the middle band (2.3%). The
 baselines degrade monotonically with volatility, which is what one would have predicted for
@@ -75,7 +71,7 @@ stressed days holding four breaches cannot settle that. Under the alternative re
 definition no pairwise difference is significant at all. This is a failure to find an
 effect, not a demonstration that there is none.
 
-**4. The models separate by model class, not by estimator.** Both GARCH models beat both
+**2. The models separate by model class, not by estimator.** Both GARCH models beat both
 baselines on QLIKE with bootstrap intervals nowhere near zero. The frequentist and Bayesian
 pair differ by half a percent of the loss level, and the plug-in at the posterior mean
 cannot be separated from the MLE plug-in at all.
@@ -95,12 +91,12 @@ where it turned out to be wrong. That is the point of pre-registering it.
 | Risk register: "Bayesian ≈ frequentist everywhere — still a finding: parameter uncertainty moves intervals less than innovation choice." | Exactly this. Identical coverage, identical breach counts, invariant to the prior. | **correct** |
 | GARCH-normal "expected to fail hard" at 99%. | Fails hard: PIT p = 2.6 × 10⁻⁴ against the t's 0.115; 53 breaches against 37. | **correct** |
 | "Few stressed-regime observations" — certain risk. | 347 days, four breaches, intervals wide enough to admit a third of nominal or double it. | **correct** |
-| *(not anticipated — no model in the lineup can express skew)* | The intervals are asymmetric at every level, p between 10⁻⁴ and 10⁻⁷, driven by −0.79 residual skew. Finding 1 above. | **unforeseen** |
+| *(not anticipated — no model in the lineup can express skew)* | The intervals are asymmetric at every level, p between 10⁻⁴ and 10⁻⁷, driven by −0.79 residual skew. The opening of this file. | **unforeseen** |
 
 **Four claims this project published turned out to be false**, and are recorded as false
 rather than quietly amended: three from the protocol above, plus one of its own later
-findings — the regime claim in §3, which was stated more strongly than the test underneath
-it supported. See [`research_log.md`](research_log.md) §1.13 and §1.19, and
+findings — the regime claim in finding 1 above, which was stated more strongly than the
+test underneath it supported. See [`research_log.md`](research_log.md) §1.13 and §1.19, and
 [`docs/problems-and-solutions.md`](docs/problems-and-solutions.md) #38, #41, #42 and #46.
 In every case the code was correct and the *sentence about* the code was wrong.
 
@@ -109,6 +105,17 @@ itself. The full argument, with every caveat that qualifies it, is in
 [`report/report.md`](report/report.md).
 
 ## Models compared
+
+Every stage of the governing plan is delivered. Four forecasters — both baselines, the
+frequentist GARCH(1,1)-t and the Bayesian GARCH(1,1)-t — plus two ablations, each with a
+forecast table over the 2,134-day evaluation window. The Bayesian model is fitted by NUTS
+at each of the 102 refit dates, 100 of which converged. The evaluation layer scores all of
+it: point losses, PIT, interval coverage, Kupiec and Christoffersen, Diebold-Mariano, the
+regime split, and block-bootstrap intervals throughout. Robustness covers the proxy scale,
+the refit cadence, the regime definition, the innovation distribution, and a full re-run of
+the Bayesian backtest under each prior the design rejected. Stage numbers follow
+[`docs/project1-implementation-plan.md`](docs/project1-implementation-plan.md), the
+governing plan.
 
 | # | Model | Key | Role | State |
 |---|---|---|---|---|
@@ -474,7 +481,7 @@ measurement, and the governing plan's risk register called it.
 **The intervals are the wrong shape, and this is the strongest result of the four.** Both
 GARCH models put their exceptions overwhelmingly in the loss tail at every level, rejecting
 symmetry at p between 1e-4 and 3e-7, driven by a standardised-residual skew of -0.79 that a
-symmetric Student-t innovation cannot represent. See finding 1 at the top of this file,
+symmetric Student-t innovation cannot represent. See the opening of this file,
 `eval_tail_asymmetry.csv` and figure 14.
 
 Both GARCH-t models nonetheless pass a KS test of PIT uniformity (p = 0.115 and 0.175,
@@ -526,7 +533,7 @@ So the project asks whether 99% still means 99% when VIX > 25, and the honest an
 that this sample cannot show it failing there -- not that it holds. What *is* supported is
 that the middle band is worse than calm and worse than nominal.
 
-**The tail misallocation of finding 1 is concentrated here.** At the 99% two-sided level in
+**The tail misallocation in the opening is concentrated here.** At the 99% two-sided level in
 the normal regime, `garch_mle` puts **14 breaches below the interval and none above**,
 against 5.2 expected in each tail. Total coverage there is 0.9864 against a nominal 0.99 --
 a near miss -- while every breach is a loss. The asymmetry is significant on the full sample
