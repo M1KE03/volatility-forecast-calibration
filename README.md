@@ -24,8 +24,7 @@ not by the treatment of parameters.**
 
 **Status: complete.** 351 tests pass, one skipped by design; the pipeline
 reproduces byte for byte from a fresh clone, the NUTS-sampled track included.
-Write-up: [`report/report.md`](report/report.md). Picking this up cold:
-[`docs/handoff.md`](docs/handoff.md).
+Write-up: [`report/report.md`](report/report.md).
 
 ## Research question
 
@@ -58,11 +57,11 @@ with symmetric Student-t innovations has no parameter that could represent it.
 The naive baseline is *not* asymmetric at any level; it is simply too narrow. Wrong shape
 and wrong scale are different failures, and only one of them shows up in a coverage number.
 
-**1. No evidence that tail calibration degrades in high volatility.** Both GARCH models
-breach their 99% VaR at a rate indistinguishable from nominal when VIX is below 15 (1.19%)
-*and* above 25 (1.15%, 1.47%), and clearly too often in the middle band (2.3%). The
-baselines degrade monotonically with volatility, which is what one would have predicted for
-all four.
+**Regime dependence.** No evidence that tail calibration degrades in high volatility. Both
+GARCH models breach their 99% VaR at a rate indistinguishable from nominal when VIX is
+below 15 (1.19%) *and* above 25 (1.15%, 1.47%), and clearly too often in the middle band
+(2.3%). The baselines degrade monotonically with volatility, which is what one would have
+predicted for all four.
 
 Stated carefully, because the obvious phrasing overstates it: the middle band is
 significantly worse than **calm** (+1.14pp, CI [+0.16, +2.13]) and worse than nominal, but
@@ -71,10 +70,10 @@ stressed days holding four breaches cannot settle that. Under the alternative re
 definition no pairwise difference is significant at all. This is a failure to find an
 effect, not a demonstration that there is none.
 
-**2. The models separate by model class, not by estimator.** Both GARCH models beat both
-baselines on QLIKE with bootstrap intervals nowhere near zero. The frequentist and Bayesian
-pair differ by half a percent of the loss level, and the plug-in at the posterior mean
-cannot be separated from the MLE plug-in at all.
+**Model-class separation.** The models separate by model class, not by estimator. Both
+GARCH models beat both baselines on QLIKE with bootstrap intervals nowhere near zero. The
+frequentist and Bayesian pair differ by half a percent of the loss level, and the plug-in
+at the posterior mean cannot be separated from the MLE plug-in at all.
 
 ## What the protocol expected, and what happened
 
@@ -95,8 +94,8 @@ where it turned out to be wrong. That is the point of pre-registering it.
 
 **Four claims this project published turned out to be false**, and are recorded as false
 rather than quietly amended: three from the protocol above, plus one of its own later
-findings — the regime claim in finding 1 above, which was stated more strongly than the
-test underneath it supported. See [`research_log.md`](research_log.md) §1.13 and §1.19, and
+findings — the regime finding above, which was stated more strongly than the test
+underneath it supported. See [`research_log.md`](research_log.md) §1.13 and §1.19, and
 [`docs/problems-and-solutions.md`](docs/problems-and-solutions.md) #38, #41, #42 and #46.
 In every case the code was correct and the *sentence about* the code was wrong.
 
@@ -201,11 +200,6 @@ mattered, and the fix now in the repository — see
 covering the look-ahead hazards, the proxy scale mismatch, the environment and toolchain
 work, and a set of test-integrity lessons that generalise beyond this project — including
 the four occasions this project's own published claims turned out to be wrong.
-
-**Picking this up cold?** [`docs/handoff.md`](docs/handoff.md) is the entry point: what
-exists, what the results actually say as against what a reader will expect them to say,
-which rules are not revisable, and the specific traps in this codebase that do damage while
-looking fine.
 
 ## Quantities that must not be conflated
 
@@ -607,7 +601,6 @@ and never reaches the analysis frame (decision D8 in `research_log.md`).
 ├── run_all.py             # single entry point
 ├── research_log.md        # decision register + changelog
 ├── docs/
-│   ├── handoff.md                        # START HERE: state, what the results say, traps
 │   ├── project1-implementation-plan.md   # governing plan: stages, budget, cut list
 │   └── problems-and-solutions.md         # every difficulty hit so far, and its fix
 ├── data/
