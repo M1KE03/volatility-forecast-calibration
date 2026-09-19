@@ -3,8 +3,8 @@
 **A GARCH model can pass the standard calibration test while every interval
 breach lands in the loss tail.** Over a 2,134-day out-of-sample window on SPY,
 both a frequentist and a Bayesian GARCH(1,1)-t put their exceptions
-overwhelmingly below the interval at every level — 156/81 at 90%, 77/25 at 95%,
-20/2 at 99%, against equal tails expected — rejecting symmetry at p between
+overwhelmingly below the interval at every level: 156/81 at 90%, 77/25 at 95%,
+20/2 at 99%, against equal tails expected. That rejects symmetry at p between
 1.2 × 10⁻⁴ and 2.5 × 10⁻⁷. The cause is a standardised-residual skew of −0.79
 that a symmetric Student-t innovation has no parameter to represent. Meanwhile
 the PIT mean is 0.4998 and the KS test passes at p = 0.115: the misallocation
@@ -14,7 +14,7 @@ cancels in aggregate, so the usual distributional check cannot see it.
 
 **Integrating over parameter uncertainty changes no coverage number.** The
 posterior predictive is 0.32% wider at 99% than the plug-in at its own posterior
-mean — exactly what theory predicts — and the two have identical coverage at
+mean (exactly what theory predicts), and the two have identical coverage at
 every level, in every regime, and identical breach counts. Nothing in 2,092 days
 of returns lands in that gap, and re-running the whole Bayesian backtest under
 each rejected prior leaves that figure identical to four decimal places.
@@ -32,17 +32,19 @@ For one-day-ahead S&P 500 volatility, are the predictive intervals of a frequent
 GARCH(1,1)-t model and its Bayesian counterpart calibrated at their nominal levels out
 of sample, and does that calibration survive high-volatility regimes?
 
-The methodological core is a comparison of a **frequentist plug-in predictive
-distribution** against a **Bayesian posterior-predictive distribution** built from the
-*same* GARCH likelihood. The two differ only in whether parameter uncertainty is
-integrated over. The question is whether doing so improves predictive-interval
-calibration.
+The method compares a **frequentist plug-in predictive distribution** against a
+**Bayesian posterior-predictive distribution** built from the *same* GARCH likelihood.
+The two share a likelihood and differ in the estimator: the Bayesian predictive
+integrates over parameter uncertainty, and its priors also move the point estimate off
+the MLE. The question is whether integrating over parameter uncertainty improves
+predictive-interval calibration, and the `garch_bayes_mean` track isolates it from the
+priors' effect.
 
 ## Findings
 
-The counts behind the opening — under a symmetric predictive the two tails should be
-equally populated whatever the model gets wrong about scale, and for both GARCH models
-they are not, at every level:
+These are the counts behind the opening. Under a symmetric predictive the two tails
+should be equally populated whatever the model gets wrong about scale, and for both
+GARCH models they are not, at every level:
 
 | level | GARCH-t below / above | expected each tail | symmetry test |
 |---|---|---|---|
@@ -65,7 +67,7 @@ predicted for all four.
 
 Stated carefully, because the obvious phrasing overstates it: the middle band is
 significantly worse than **calm** (+1.14pp, CI [+0.16, +2.13]) and worse than nominal, but
-it is **not** distinguishable from the stressed regime (+1.18pp, CI [−0.17, +2.34]) — 347
+it is **not** distinguishable from the stressed regime (+1.18pp, CI [−0.17, +2.34]); 347
 stressed days holding four breaches cannot settle that. Under the alternative regime
 definition no pairwise difference is significant at all. This is a failure to find an
 effect, not a demonstration that there is none.
@@ -94,8 +96,9 @@ where it turned out to be wrong. That is the point of pre-registering it.
 
 **Four claims this project published turned out to be false**, and are recorded as false
 rather than quietly amended: three from the protocol above, plus one of its own later
-findings — the regime finding above, which was stated more strongly than the test
-underneath it supported. See [`research_log.md`](research_log.md) §1.13 and §1.19, and
+findings: an earlier wording of the regime result, stated more strongly than the test
+underneath it supported. The version in Findings is the corrected one. See
+[`research_log.md`](research_log.md) §1.13 and §1.19, and
 [`docs/problems-and-solutions.md`](docs/problems-and-solutions.md) #38, #41, #42 and #46.
 In every case the code was correct and the *sentence about* the code was wrong.
 
@@ -105,14 +108,15 @@ itself. The full argument, with every caveat that qualifies it, is in
 
 ## Models compared
 
-Every stage of the governing plan is delivered. Four forecasters — both baselines, the
-frequentist GARCH(1,1)-t and the Bayesian GARCH(1,1)-t — plus two ablations, each with a
-forecast table over the 2,134-day evaluation window. The Bayesian model is fitted by NUTS
-at each of the 102 refit dates, 100 of which converged. The evaluation layer scores all of
-it: point losses, PIT, interval coverage, Kupiec and Christoffersen, Diebold-Mariano, the
-regime split, and block-bootstrap intervals throughout. Robustness covers the proxy scale,
-the refit cadence, the regime definition, the innovation distribution, and a full re-run of
-the Bayesian backtest under each prior the design rejected. Stage numbers follow
+Every stage of the governing plan is delivered. There are four forecasters (both
+baselines, the frequentist GARCH(1,1)-t and the Bayesian GARCH(1,1)-t) plus two
+ablations, each with a forecast table over the 2,134-day evaluation window. The Bayesian
+model is fitted by NUTS at each of the 102 refit dates, 100 of which converged. The
+evaluation layer scores all of it: point losses, PIT, interval coverage, Kupiec and
+Christoffersen, Diebold-Mariano, the regime split, and block-bootstrap intervals
+throughout. Robustness covers the proxy scale, the refit cadence, the regime definition,
+the innovation distribution, and a full re-run of the Bayesian backtest under each prior
+the design rejected. Stage numbers follow
 [`docs/project1-implementation-plan.md`](docs/project1-implementation-plan.md), the
 governing plan.
 
@@ -124,9 +128,9 @@ governing plan.
 | 4 | GARCH(1,1)-t, Bayesian | `garch_bayes` | Posterior predictive | built |
 
 Models 3 and 4 share one log-likelihood implementation (`src/models.py`), so that "the
-same underlying likelihood" is a property of the code rather than a claim — and since
-Stage 3 a property that is checked, because PyMC builds its own graph rather than calling
-that implementation, and a test requires the two to agree at a fixed parameter vector.
+same underlying likelihood" is a property of the code rather than a claim. Since Stage 3
+it is a property that is checked: PyMC builds its own graph rather than calling that
+implementation, and a test requires the two to agree at a fixed parameter vector.
 
 **What that does and does not license.** The two models differ in the *estimator*, not in
 the model. It does **not** follow that the difference between their intervals is
@@ -134,7 +138,7 @@ parameter uncertainty, and an earlier version of this README said it did. The fr
 predictive sits at the maximum of the likelihood; the Bayesian one integrates a posterior
 that the priors have moved off that maximum. Measured over the full evaluation window at the
 99% level, parameter uncertainty widens the interval by 0.3% and the priors narrow it by
-1.9% — pointing opposite ways, with the priors roughly six times the larger. And the
+1.9%. They point opposite ways, and the priors are roughly six times the larger. And the
 regime dependence is entirely the priors: parameter uncertainty's contribution is flat
 across calm, normal and stressed days to within four parts in ten thousand. The mechanism
 and the numbers are in `research_log.md` §1.13-1.14; the trap is
@@ -144,7 +148,7 @@ apart.
 Two further tracks are carried through the same backtest, and neither is a competitor.
 `backtest.HEADLINE_MODELS` excludes both and the evaluation layer filters on that tuple.
 
-`garch_mle_normal` is the **innovation ablation** — normal versus Student-t, the cheap and
+`garch_mle_normal` is the **innovation ablation**: normal versus Student-t, the cheap and
 decisive lever on 99% tail coverage. It is carried through the main backtest because doing
 so costs five seconds per run and saved re-entering the walk-forward loop at Stage 6.
 
@@ -158,7 +162,7 @@ posterior is integrated over:
 | `garch_bayes` vs `garch_bayes_mean` | parameter uncertainty, and nothing else |
 | `garch_bayes_mean` vs `garch_mle` | the priors' effect on the point estimate |
 
-It costs no sampling — it reuses the posterior each refit already produced — and it is
+It costs no sampling (it reuses the posterior each refit already produced), and it is
 built inside the same loop rather than from the persisted posterior means, so the two
 tracks cannot fall out of step.
 
@@ -188,37 +192,37 @@ Explicitly **out of scope** in the core version: LSTM, Transformer, stochastic
 volatility, macro variables, multiple assets, dashboards.
 
 The plan of work is [`docs/project1-implementation-plan.md`](docs/project1-implementation-plan.md):
-eight stages, a ~15-20h budget, and an ordered cut list. The full decision register — 39
-numbered decisions, several of them refusals — is in
+eight stages, a ~15-20h budget, and an ordered cut list. The full decision register (39
+numbered decisions, several of them refusals) is in
 [`research_log.md`](research_log.md); §1.5 there records the 2026-08-23 switch to this
 plan and the retirement of the earlier one, which was deleted at the switch and
 survives only in git history (see `git log -- docs/implementation_plan.md`).
 
-For a problem-oriented view of the same history — every difficulty encountered, why it
-mattered, and the fix now in the repository — see
-[`docs/problems-and-solutions.md`](docs/problems-and-solutions.md). Forty-six entries
-covering the look-ahead hazards, the proxy scale mismatch, the environment and toolchain
-work, and a set of test-integrity lessons that generalise beyond this project — including
-the four occasions this project's own published claims turned out to be wrong.
+[`docs/problems-and-solutions.md`](docs/problems-and-solutions.md) gives a
+problem-oriented view of the same history: every difficulty encountered, why it mattered,
+and the fix now in the repository. Forty-six entries covering the look-ahead hazards, the
+proxy scale mismatch, the environment and toolchain work, and a set of test-integrity
+lessons that generalise beyond this project, including the four occasions this project's
+own published claims turned out to be wrong.
 
 ## Quantities that must not be conflated
 
 This project involves several distinct objects that are easy to blur together. They
 are kept distinct in code and in the report:
 
-- **Observed returns** -- realised daily log returns. The target for interval
+- **Observed returns**: realised daily log returns. The target for interval
   calibration and VaR.
-- **Parkinson volatility proxy** -- a high/low range estimator of *intraday* variance.
+- **Parkinson volatility proxy**: a high/low range estimator of *intraday* variance.
   The target for point-forecast loss only. It is **not** the same quantity the models
   forecast (see the caveat below).
-- **Conditional variance forecast** -- the model's one-day-ahead variance.
-- **Predictive interval** -- a two-sided interval for the *return*, not for the variance.
-- **VaR forecast** -- a one-sided lower quantile of the return distribution.
-- **Parameter uncertainty** -- uncertainty about GARCH coefficients. Present in the
+- **Conditional variance forecast**: the model's one-day-ahead variance.
+- **Predictive interval**: a two-sided interval for the *return*, not for the variance.
+- **VaR forecast**: a one-sided lower quantile of the return distribution.
+- **Parameter uncertainty**: uncertainty about GARCH coefficients. Present in the
   Bayesian posterior predictive; absent from the frequentist plug-in. **Not** the same
   thing as the difference between the two models' intervals, which also contains the
   priors' effect on the point estimate (see above).
-- **Innovation uncertainty** -- uncertainty from the Student-t shock. Present in both.
+- **Innovation uncertainty**: uncertainty from the Student-t shock. Present in both.
 
 ### Known caveat: Parkinson is not on the forecast target's scale
 
@@ -227,7 +231,7 @@ GARCH models forecast the variance of the *close-to-close* return, which also co
 the overnight gap. Parkinson is therefore biased low relative to the forecast target,
 and QLIKE's proxy-robustness property assumes a conditionally unbiased proxy. This
 affects the **point-forecast loss only**; the interval-calibration and VaR results are
-evaluated against observed returns and are unaffected — which a test asserts, by scrambling
+evaluated against observed returns and are unaffected. A test asserts that, by scrambling
 the proxy and requiring every calibration number to come back bit-identical. The robustness
 check re-scores every model against the **raw, unscaled Parkinson series**: the ranking is
 unchanged, so it is a fact about the models rather than about `c`. The caveat belongs in the
@@ -241,13 +245,13 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-Requires Python 3.12 **and a C/C++ compiler on `PATH`** — PyMC's PyTensor backend needs
+Requires Python 3.12 **and a C/C++ compiler on `PATH`**: PyMC's PyTensor backend needs
 one. `pip install -r requirements.txt` does not supply it, so it is the one part of the
 environment that is not reproducible from that file alone.
 
 This machine uses **MinGW-w64 GCC 16.2.0** (UCRT, x86_64) from the
 [WinLibs](https://winlibs.com/) release `16.2.0posix-14.0.0-ucrt-r1`, unpacked to
-`C:\Users\micha\toolchains\mingw64` and added to the user `PATH`. It is portable: no
+`C:\toolchains\mingw64` and added to the user `PATH`. It is portable: no
 administrator rights are needed, and uninstalling means deleting that directory. Verify
 with:
 
@@ -264,8 +268,8 @@ SHA-256, and why this replaced the earlier compiler-free design are in `research
 
 ```bash
 python run_all.py --help            # list pipeline stages
-python run_all.py --stage data      # build the analysis frame (implemented)
-python run_all.py --stage eda       # ARCH-LM, Ljung-Box, ADF + Stage 0 figures (implemented)
+python run_all.py --stage data      # build the analysis frame
+python run_all.py --stage eda       # ARCH-LM, Ljung-Box, ADF + Stage 0 figures
 python run_all.py --stage backtest  # walk-forward loop, baselines + MLE GARCH (~1 min)
 python run_all.py --stage bayes     # the Bayesian track, 102 NUTS fits (~95 min)
 python run_all.py --stage evaluate   # losses, coverage, VaR backtests, DM, bootstrap CIs
@@ -276,7 +280,7 @@ python run_all.py --all              # the pipeline (everything except `priors`)
 ```
 
 **The backtest is two stages, for cost rather than design.** `--stage backtest` refits
-GARCH at each of the 102 refit dates for both innovation distributions -- 306
+GARCH at each of the 102 refit dates for both innovation distributions: 306
 maximum-likelihood fits, about a minute. `--stage bayes` runs the same walk-forward loop
 over the same refit dates with NUTS, which takes about ninety-five. Each writes its own
 partial tables and rebuilds the merged `forecasts.csv` from whichever partials are on
@@ -298,8 +302,8 @@ the cheap frequentist track; `--stage figures` draws solely from those tables, s
 and the number it plots cannot disagree. All three run in seconds.
 
 `--stage priors` is the one stage `--all` leaves out. It re-runs the Bayesian backtest
-under each of the two `delta` priors the design considered and rejected -- about 190
-minutes for a robustness check that produces no headline number -- and writes to
+under each of the two `delta` priors the design considered and rejected (about 190
+minutes for a robustness check that produces no headline number), and writes to
 `data/processed/prior_sensitivity/`. It cannot touch `forecasts.csv`: the merge that
 rebuilds that file iterates over a fixed set of tracks, which these runs are not in.
 
@@ -318,14 +322,14 @@ on the warm-up sample only and frozen:
 c = mean(r^2) / mean(sigma^2_P) = 1.517318      (2014-01-02 .. 2016-12-30, n = 756)
 ```
 
-Without it the error would pull in two directions at once: the RW baseline would be
+Without it the error would pull in two directions at once: the `yesterday` baseline would be
 unfairly advantaged on QLIKE (its units match the raw proxy) while its intervals came out
 ~23% too narrow, so it would win the point-forecast table and fail the calibration table
 for reasons having nothing to do with forecasting. Separately, QLIKE's proxy-robustness
 (Patton 2011) presumes an unbiased proxy.
 
 **What `c` does not do.** It removes the systematic level error but does *not* make the
-proxy conditionally unbiased -- within the warm-up alone the quarterly ratio ranges from
+proxy conditionally unbiased: within the warm-up alone the quarterly ratio ranges from
 1.18 to 1.94, and the overnight share plausibly co-moves with regime. The proxy is
 approximately unbiased *on average*; proxy-robustness is approached, not restored. The
 QLIKE ranking was re-run on raw Parkinson and is unchanged, so it does not hinge on `c`
@@ -335,12 +339,12 @@ QLIKE ranking was re-run on raw Parkinson and is unchanged, so it does not hinge
 
 The single test the whole project's credibility rests on. It runs the backtest, corrupts
 every observation from a date `t` onward, re-runs, and asserts the forecasts are
-bit-identical before `t` -- at Volmageddon, the largest COVID drawdown day, and a 2022
-selloff.
+bit-identical before `t`. The corruption dates are Volmageddon, the largest COVID
+drawdown day, and a 2022 selloff.
 
 A precise distinction is built into it. Corrupting from `t` must leave the *forecast*
 columns unchanged up to and including `t`, because the forecast for `t` is built from
-data through `t-1`. It must **not** leave the *evaluation* columns at `t` unchanged --
+data through `t-1`. It must **not** leave the *evaluation* columns at `t` unchanged:
 `log_return` and its `pit` are functions of day `t` itself. Asserting the stronger claim
 would be asserting something false, and would have to be weakened later, which is how a
 look-ahead test quietly stops testing anything.
@@ -358,9 +362,9 @@ Since Stage 3 the Bayesian track is audited too, under the same corruption dates
 same claim, but against a **recording stub** in place of NUTS. That is not a concession.
 A Bayesian refit costs 9-17 seconds before it draws anything, because the floor is
 compiling the gradient of the variance recursion, so a real-sampler audit would put a
-default `pytest` near two hours -- and an audit that slow gets skipped, which is the cut
-the never-cut list exists to prevent. Every look-ahead surface still runs in the real code
-path at all 102 refit dates, and the stub additionally records the exact array each fit
+default `pytest` near two hours. An audit that slow gets skipped, which is the cut the
+never-cut list exists to prevent. Every look-ahead surface still runs in the real code
+path at all 102 refit dates, and the stub also records the exact array each fit
 was handed, so "no fit saw data from on or after its own refit date" becomes an assertion
 on the sampler's input rather than an inference from its output. The real sampler is
 audited end to end behind an opt-in flag.
@@ -371,18 +375,18 @@ pytest -m "not slow" -q                # inner loop (~2 min)
 pytest --bayes-audit -m bayes_audit    # the audit with NUTS itself (~40 min)
 ```
 
-The `slow` marker covers the 26 tests that need a backtest run — the six corrupted
+The `slow` marker covers the 26 tests that need a backtest run: the six corrupted
 re-runs of the two audits, the two vacuity checks beside them, the determinism test, and
 the model-recovery tests that fit or sample from scratch. Everything else shares one
-module-scoped run, which is why the inner loop still costs a minute rather than seconds. Plain `pytest` runs the marked tests too — the audit
-is on the governing plan's never-cut list, and a default test run must not be the thing
-that skips it.
+module-scoped run, which is why the inner loop still costs a minute rather than seconds.
+Plain `pytest` runs the marked tests too. The audit is on the governing plan's never-cut
+list, and a default test run must not be the thing that skips it.
 
 ### What the EDA establishes
 
 Diagnostics are computed on the **training window only** (2014-01-02 to 2016-12-30).
 Justifying the model class with a statistic computed over the out-of-sample period would
-let the evaluation window argue for the model later evaluated on it -- a mild look-ahead,
+let the evaluation window argue for the model later evaluated on it: a mild look-ahead,
 but the exact species this project exists to detect. Full-sample values are printed as
 labelled descriptive context and justify nothing.
 
@@ -412,7 +416,7 @@ built to prevent. Parameters are re-estimated every 21 trading days on the expan
 window; *between* refits they are held fixed while the variance recursion still advances
 daily with each newly observed return. Freezing the variance between refits as well
 would produce a complete, plausible forecast table built on variances up to 21 days
-stale — which is not a one-day-ahead GARCH forecast at all.
+stale. That is not a one-day-ahead GARCH forecast at all.
 
 On the warm-up window (756 observations, training only):
 
@@ -439,7 +443,7 @@ by NUTS share no code, so their agreement is better evidence than either number 
 
 `figures/07_garch_parameter_stability.png` tracks the estimates across all 102 refits.
 Persistence rises through the sample and exceeds 0.999 in 16 of them, peaking at
-0.99998 — every fit admissible and converged, but very nearly at the stationarity
+0.99998: every fit admissible and converged, but very nearly at the stationarity
 boundary. That is ordinary for a long daily equity sample containing 2020 and 2022, and
 it is recorded because the Bayesian model at Stage 3 enforces the same constraint by
 construction and will press against the same edge.
@@ -453,12 +457,12 @@ expected.
 **Point accuracy separates GARCH from no GARCH, not one estimator from the other.** Mean
 QLIKE over the 2,092-day common sample: `garch_bayes` 0.4577, `garch_mle` 0.4599, `ewma`
 0.5239, `yesterday` 0.7809. Both GARCH models beat both baselines with block-bootstrap
-intervals nowhere near zero. `garch_mle` against `garch_bayes` differs by 0.0022 -- half a
-percent of the loss level -- and `garch_bayes_mean` against `garch_mle` cannot be
+intervals nowhere near zero. `garch_mle` against `garch_bayes` differs by 0.0022 (half a
+percent of the loss level), and `garch_bayes_mean` against `garch_mle` cannot be
 separated at all.
 
 **The 99% VaR fails on the level of tail risk, not its timing.** Every model takes far too
-many breaches -- 87, 54, 37 and 37 against 21 expected -- and Kupiec rejects for all four.
+many breaches (87, 54, 37 and 37 against 21 expected), and Kupiec rejects for all four.
 **Christoffersen's independence test rejects for none of them.** The plan called
 independence the money test on the argument that correct average coverage can hide
 clustered breaches; here the average coverage is wrong and the clustering is absent, which
@@ -467,22 +471,22 @@ sample, not a demonstration that breaches are well timed, and the report says so
 
 **Integrating over parameter uncertainty changes no coverage number.** `garch_bayes` and
 `garch_bayes_mean` have identical coverage at every level, in every regime, and identical
-99% breach counts -- despite the posterior predictive being 0.32% wider at 99%. Nothing in
+99% breach counts, despite the posterior predictive being 0.32% wider at 99%. Nothing in
 2,092 days of returns lands in that gap. At n >= 750, parameter uncertainty is not what
 determines whether a risk model's intervals are calibrated; that is the project's central
 measurement, and the governing plan's risk register called it.
 
 **The intervals are the wrong shape, and this is the strongest result of the four.** Both
 GARCH models put their exceptions overwhelmingly in the loss tail at every level, rejecting
-symmetry at p between 1e-4 and 3e-7, driven by a standardised-residual skew of -0.79 that a
-symmetric Student-t innovation cannot represent. See the opening of this file,
-`eval_tail_asymmetry.csv` and figure 14.
+symmetry at p between 1.2 × 10⁻⁴ and 2.5 × 10⁻⁷, driven by a standardised-residual skew
+of -0.79 that a symmetric Student-t innovation cannot represent. See the opening of this
+file, `eval_tail_asymmetry.csv` and figure 14.
 
 Both GARCH-t models nonetheless pass a KS test of PIT uniformity (p = 0.115 and 0.175,
 approximate because the parameters are estimated) while `ewma` fails at 3e-14, `yesterday`
-at 1e-7 and the `garch_mle_normal` ablation at 2.6e-4. That combination — an aggregate
-distributional test passing while the tail split fails decisively — is the point of
-reporting both.
+at 1e-7 and the `garch_mle_normal` ablation at 2.6e-4. That combination is the point of
+reporting both: an aggregate distributional test passing while the tail split fails
+decisively.
 
 Regime-conditional versions of all of this, with bootstrap confidence intervals, follow
 below.
@@ -504,12 +508,12 @@ a stationary-block-bootstrap interval computed within the regime.
 | `ewma` | 1.59% [0.79, 2.38] | 2.91% [2.04, 3.88] | 3.46% [1.44, 6.05] |
 | `yesterday` | 3.70% [2.51, 4.89] | 4.08% [2.72, 5.44] | 4.90% [2.88, 7.20] |
 
-`n` is 757 / 1,030 / 347 for every model except `garch_bayes`, which is 756 / 995 / 341 —
+`n` is 757 / 1,030 / 347 for every model except `garch_bayes`, which is 756 / 995 / 341;
 the two failed refits fall in the normal and stressed regimes. Each row is on its own
 available days, and `eval_regime_var.csv` carries the `n` per row.
 
 Both GARCH models are indistinguishable from nominal in calm *and* in stress, and clearly
-too high in the middle band. The baselines degrade monotonically with volatility -- the
+too high in the middle band. The baselines degrade monotonically with volatility, the
 pattern one would have predicted for all four.
 
 **The differences between regimes need their own test, and only one survives it.** A regime
@@ -524,13 +528,13 @@ question of power. Bootstrapping the difference directly (`eval_regime_differenc
 | calm - stressed | +0.04pp [-1.22, +1.14] | no |
 
 So the project asks whether 99% still means 99% when VIX > 25, and the honest answer is
-that this sample cannot show it failing there -- not that it holds. What *is* supported is
+that this sample cannot show it failing there, not that it holds. What *is* supported is
 that the middle band is worse than calm and worse than nominal.
 
 **The tail misallocation in the opening is concentrated here.** At the 99% two-sided level in
 the normal regime, `garch_mle` puts **14 breaches below the interval and none above**,
-against 5.2 expected in each tail. Total coverage there is 0.9864 against a nominal 0.99 --
-a near miss -- while every breach is a loss. The asymmetry is significant on the full sample
+against 5.2 expected in each tail. Total coverage there is 0.9864 against a nominal 0.99
+(a near miss), while every breach is a loss. The asymmetry is significant on the full sample
 independently of any regime split, which is why it leads the findings above rather than
 this section.
 
@@ -543,8 +547,8 @@ volatility. Under this definition no pairwise regime difference is significant a
 
 **What this does not establish.** *Why* the middle band is the weak spot is a conjecture:
 15-25 is where regime transitions happen and a GARCH forecast lags a change in level by
-construction, but this design cannot test that. And the stressed intervals are wide --
-[0.29%, 2.02%] admits rates from a third of nominal to double it -- which is why the
+construction, but this design cannot test that. And the stressed intervals are wide:
+[0.29%, 2.02%] admits rates from a third of nominal to double it, which is why the
 difference tests above, not the regime-by-regime table, carry the conclusion.
 
 ### What the robustness checks establish
@@ -583,7 +587,7 @@ at the locked 21-day cadence. Regime counts on the lagged VIX close, over the **
 sample**, are calm 1,198, normal 1,317, stressed 375; restricted to the **evaluation
 window** they are 757, 1,030 and 347, which are the `n` the regime tables report. Either
 way the stressed regime is around 13% of the days, which is thin for the 99% level and
-thinner still for the 99% VaR — and is why no regime statistic here appears without its
+thinner still for the 99% VaR, and is why no regime statistic here appears without its
 `n` and an interval.
 
 Raw data is downloaded from 2013-12-01, one month before the sample start, so that the
@@ -633,7 +637,7 @@ and never reaches the analysis frame (decision D8 in `research_log.md`).
   contain no reusable logic.
 - **Verified from a fresh clone**, not merely claimed. Cloning this repository and running
   the whole pipeline reproduces `analysis_frame.csv`, `forecasts_frequentist.csv`,
-  `forecasts_bayes.csv` and the merged `forecasts.csv` **byte for byte** -- the Bayesian
+  `forecasts_bayes.csv` and the merged `forecasts.csv` **byte for byte**: the Bayesian
   track included, in a separate process, with identical convergence diagnostics and the
   same two refits failing on the same two dates. The only artefact that differs is the
   `seconds_elapsed` column of the refit records, which is wall-clock timing.
